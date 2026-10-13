@@ -202,7 +202,14 @@ async fn expired_tokens_trigger_relogin_and_never_leak() {
     // Every failure is an expired token, and users kept working afterwards.
     assert!(m.failures > 0);
     assert_eq!(m.status_counts.get(&401).copied(), Some(m.failures));
-    assert_eq!(m.per_step["login/token"].requests as usize, tokens.len());
+    // A login still in flight at the end got its token but isn't recorded (aborted
+    // requests don't count), so at most one per user may be missing.
+    let logins = m.per_step["login/token"].requests as usize;
+    assert!(
+        (tokens.len() - 5..=tokens.len()).contains(&logins),
+        "{logins} logins recorded, {} tokens issued",
+        tokens.len()
+    );
     let late_ok = m
         .records
         .iter()
