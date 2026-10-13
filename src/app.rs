@@ -4,7 +4,7 @@ use std::time::Duration;
 use eframe::egui::{self, Color32, RichText};
 use egui_plot::{Legend, Line, Plot};
 use powerwizz::engine::{self, ErrorKind, Handle, Status};
-use powerwizz::metrics::Point;
+use powerwizz::metrics::{self, Point};
 use powerwizz::model::{
     self, Account, AuthStrategy, MAX_DURATION_SECS, MAX_USERS, Method, OnError, Scenario, Step,
     TestDefinition,
@@ -18,6 +18,7 @@ pub struct App {
     accounts: Vec<Account>,
     accounts_path: String,
     json_path: String,
+    export_path: String,
     keep_records: bool,
     /// Last file operation result: (is_error, text).
     message: Option<(bool, String)>,
@@ -33,6 +34,7 @@ impl Default for App {
             accounts: Vec::new(),
             accounts_path: "accounts.csv".into(),
             json_path: "test.json".into(),
+            export_path: "ergebnis".into(),
             keep_records: false,
             message: None,
             start_errors: Vec::new(),
@@ -389,6 +391,41 @@ impl App {
         .response
         .on_hover_text("Perzentile aus Histogramm, Genauigkeit ca. ±2,5 %");
 
+        ui.horizontal(|ui| {
+            ui.label("CSV-Export");
+            ui.add(egui::TextEdit::singleline(&mut self.export_path).desired_width(200.0))
+                .on_hover_text("Basisname: <name>-zusammenfassung.csv und <name>-requests.csv");
+            let finished = sh.status() == Status::Finished;
+            if ui
+                .add_enabled(finished, egui::Button::new("Zusammenfassung"))
+                .clicked()
+            {
+                let csv = metrics::summary_csv(&sh.metrics.lock().unwrap(), runtime);
+                self.message = Some(write_file(
+                    &format!("{}-zusammenfassung.csv", self.export_path),
+                    &csv,
+                ));
+            }
+            let has_records = !sh.metrics.lock().unwrap().records.is_empty();
+            if ui
+                .add_enabled(
+                    finished && has_records,
+                    egui::Button::new("Request-Details"),
+                )
+                .on_disabled_hover_text("Nur mit aktivierten Request-Details, nach Testende")
+                .clicked()
+            {
+                let csv = metrics::records_csv(&sh.metrics.lock().unwrap());
+                self.message = Some(write_file(
+                    &format!("{}-requests.csv", self.export_path),
+                    &csv,
+                ));
+            }
+            if let Some((is_err, text)) = &self.message {
+                ui.colored_label(if *is_err { ERR } else { Color32::GRAY }, text);
+            }
+        });
+
         let height = ((ui.available_height() - 200.0) / 2.0).max(120.0);
         ui.label("Requests und Fehler pro Sekunde");
         Plot::new("rps")
@@ -487,6 +524,13 @@ impl App {
                 Err(e) => self.start_errors = e,
             }
         }
+    }
+}
+
+fn write_file(path: &str, text: &str) -> (bool, String) {
+    match std::fs::write(path, text) {
+        Ok(()) => (false, format!("Gespeichert: {path}")),
+        Err(e) => (true, format!("{path}: {e}")),
     }
 }
 

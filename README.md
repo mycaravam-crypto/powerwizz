@@ -22,7 +22,11 @@ CI (GitHub Actions, `windows-latest`) runs `cargo fmt --check`, `cargo clippy --
 3. Optional login: no login, shared account, or one account per virtual user imported from a CSV (`username,password`). Login/registration steps run once per user and may use `{{username}}`, `{{password}}` and `{{vu_id}}`.
 4. Start shows a confirmation with target and load; non-local hosts get an extra warning.
 
-Test definitions are saved as JSON without passwords. Credentials stay in memory only.
+5. After the test, export CSV: `<name>-zusammenfassung.csv` (total + per step: requests, failures, error rate, RPS, mean/p50/p95/p99, status codes and error kinds) and, if request details were enabled, `<name>-requests.csv` (max. 100 000 rows).
+
+Test definitions are saved as JSON without passwords. Credentials stay in memory only. Exports never contain passwords, cookies, headers, bodies, error messages or query strings; paths come from the step template (`/user/{{username}}`), not the filled-in URL.
+
+Percentiles come from a fixed log histogram (100 µs–60 s); they are accurate to about ±2.5 %.
 
 ## Tests
 

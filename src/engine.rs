@@ -103,7 +103,10 @@ pub async fn run_step(ctx: &StepCtx<'_>, label: &str, step: &Step) -> RequestRec
             return rec;
         }
     };
-    rec.path = url.path().to_string();
+    // Path from the unfilled template: never contains filled-in credentials.
+    rec.path = resolve_url(ctx.base, &step.url)
+        .map(|u| u.path().replace("%7B%7B", "{{").replace("%7D%7D", "}}"))
+        .unwrap_or_default();
 
     let method = reqwest::Method::from_bytes(step.method.as_str().as_bytes()).unwrap();
     let mut req = ctx.client.request(method, url);
