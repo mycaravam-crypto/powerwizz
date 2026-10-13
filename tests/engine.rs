@@ -168,6 +168,24 @@ async fn per_user_accounts_log_in_separately() {
     );
     let csv = powerwizz::metrics::records_csv(&m);
     assert!(!csv.contains("pw0") && !csv.contains("user0"), "{csv}");
+    drop(m);
+
+    let report = h.shared.report_json();
+    assert!(
+        !report.contains("pw") && !report.contains("user0"),
+        "{report}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&report).unwrap();
+    assert_eq!(v["schema"], "powerwizz.report/v1");
+    assert_eq!(v["config"]["auth"], "PerUser");
+    assert_eq!(v["totals"]["users_started"], 3);
+    assert_eq!(v["totals"]["failures"], 0);
+    let steps = v["steps"].as_array().unwrap();
+    let cookie = steps.iter().find(|s| s["name"] == "s/step").unwrap();
+    assert_eq!(cookie["method"], "GET");
+    assert_eq!(cookie["path"], "/cookie/{{username}}:{{password}}");
+    assert!(cookie["latency_ms"]["p95"].as_f64().unwrap() > 0.0);
+    assert!(v["started_at"].as_str().unwrap().ends_with('Z'));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -181,6 +199,11 @@ async fn shared_account_and_failed_login() {
     h.wait().await;
     assert_eq!(srv.bodies.lock().unwrap().len(), 3);
     assert_eq!(h.shared.metrics.lock().unwrap().failures, 0);
+    let report = h.shared.report_json();
+    assert!(
+        !report.contains("secret") && !report.contains("team"),
+        "{report}"
+    );
 
     // An empty login body is rejected: each user records one failure and stops.
     d.login_steps[0].body.clear();

@@ -89,6 +89,9 @@ pub struct Point {
 
 #[derive(Clone, Debug, Default)]
 pub struct StepStats {
+    /// Method and path template of the step, e.g. "GET" and "/api/items/{{vu_id}}".
+    pub method: &'static str,
+    pub path: String,
     pub requests: u64,
     pub failures: u64,
     pub latency: Histogram,
@@ -133,6 +136,10 @@ impl Metrics {
             *self.status_counts.entry(s).or_default() += 1;
         }
         let step = self.per_step.entry(rec.step.clone()).or_default();
+        if step.requests == 0 {
+            step.method = rec.method.as_str();
+            step.path = rec.path.clone();
+        }
         step.requests += 1;
         step.latency.add(rec.duration);
         if let Some(kind) = rec.error {
