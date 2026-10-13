@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use reqwest::Url;
+use reqwest::header::{HeaderMap, SET_COOKIE};
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
@@ -12,7 +13,8 @@ use serde_json::json;
 
 use crate::metrics::{Histogram, Metrics};
 use crate::model::{
-    self, Account, AuthStrategy, Method, OnError, Step, TestDefinition, is_local_host, resolve_url,
+    self, Account, AuthStrategy, ExtractSource, Method, OnError, Step, TestDefinition,
+    is_local_host, resolve_url,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -77,21 +79,45 @@ pub fn fill(s: &str, v: &Vars) -> String {
     s
 }
 
-/// Stores the values `step.extract` points at in `body`. Errors name the
-/// pointer, never a value.
-fn extract(step: &Step, body: &[u8], vars: &Vars) -> Result<(), String> {
-    let json: serde_json::Value =
-        serde_json::from_slice(body).map_err(|_| "extract: response is not JSON".to_string())?;
+fn json_body(step: &Step) -> bool {
+    step.extract
+        .iter()
+        .any(|(_, s)| matches!(ExtractSource::parse(s), Some(ExtractSource::Json(_))))
+}
+
+/// Stores the values `step.extract` names, from the response `headers` or JSON
+/// `body`. All or nothing; errors name the source, never a value.
+fn extract(step: &Step, headers: &HeaderMap, body: &[u8], vars: &Vars) -> Result<(), String> {
+    let json: serde_json::Value = if json_body(step) {
+        serde_json::from_slice(body).map_err(|_| "extract: response is not JSON".to_string())?
+    } else {
+        serde_json::Value::Null
+    };
     let mut found = Vec::with_capacity(step.extract.len());
-    for (name, pointer) in &step.extract {
-        let value = match json.pointer(pointer) {
-            Some(serde_json::Value::String(s)) => s.clone(),
-            Some(serde_json::Value::Null) | None => {
-                return Err(format!("extract {name}: {pointer} not found"));
-            }
-            Some(other) => other.to_string(),
+    for (name, spec) in &step.extract {
+        let value = match ExtractSource::parse(spec) {
+            Some(ExtractSource::Json(pointer)) => match json.pointer(pointer) {
+                Some(serde_json::Value::String(s)) => Some(s.clone()),
+                Some(serde_json::Value::Null) | None => None,
+                Some(other) => Some(other.to_string()),
+            },
+            Some(ExtractSource::Header(h)) => headers
+                .get(h)
+                .and_then(|v| v.to_str().ok())
+                .map(strip_bearer),
+            Some(ExtractSource::Cookie(c)) => headers
+                .get_all(SET_COOKIE)
+                .iter()
+                .filter_map(|v| v.to_str().ok())
+                .filter_map(|v| v.split(';').next()?.split_once('='))
+                .find(|(k, _)| k.trim() == c)
+                .map(|(_, v)| v.trim().to_string()),
+            None => None, // rejected by validation
         };
-        found.push((name.clone(), value));
+        match value {
+            Some(v) if !v.is_empty() => found.push((name.clone(), v)),
+            _ => return Err(format!("extract {name}: {spec} not found")),
+        }
     }
     let mut ex = vars.extracted.lock().unwrap();
     for (name, value) in found {
@@ -101,6 +127,14 @@ fn extract(step: &Step, body: &[u8], vars: &Vars) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn strip_bearer(v: &str) -> String {
+    let v = v.trim();
+    match v.get(..7) {
+        Some(p) if p.eq_ignore_ascii_case("bearer ") => v[7..].trim().to_string(),
+        _ => v.to_string(),
+    }
 }
 
 /// Bodies read for extraction are capped; tokens are far smaller.
@@ -164,10 +198,16 @@ pub async fn run_step(ctx: &StepCtx<'_>, label: &str, step: &Step) -> RequestRec
         req = req.body(fill(&step.body, ctx.vars));
     }
 
-    let keep_body = !step.extract.is_empty();
+    let extracts = !step.extract.is_empty();
+    let keep_body = json_body(step);
     let result = async {
         let mut resp = req.send().await?;
         let status = resp.status().as_u16();
+        let headers = if extracts {
+            resp.headers().clone()
+        } else {
+            HeaderMap::new()
+        };
         // Read the body so latency covers the full response; only steps that
         // extract values keep it (capped), the rest is discarded chunk by chunk.
         let mut body = Vec::new();
@@ -176,17 +216,17 @@ pub async fn run_step(ctx: &StepCtx<'_>, label: &str, step: &Step) -> RequestRec
                 body.extend_from_slice(&chunk);
             }
         }
-        Ok::<(u16, Vec<u8>), reqwest::Error>((status, body))
+        Ok::<_, reqwest::Error>((status, headers, body))
     }
     .await;
     rec.duration = begin.elapsed();
     match result {
-        Ok((status, body)) => {
+        Ok((status, headers, body)) => {
             rec.status = Some(status);
             if !step.status_ok(status) {
                 rec.error = Some(ErrorKind::Status);
                 rec.message = format!("unexpected status {status}");
-            } else if keep_body && let Err(e) = extract(step, &body, ctx.vars) {
+            } else if extracts && let Err(e) = extract(step, &headers, &body, ctx.vars) {
                 rec.error = Some(ErrorKind::Other);
                 rec.message = e;
             }
@@ -708,15 +748,16 @@ mod tests {
             ..Default::default()
         };
         let v = Vars::default();
-        extract(&step, br#"{"auth":{"token":"t1"},"id":42}"#, &v).unwrap();
+        let h = HeaderMap::new();
+        extract(&step, &h, br#"{"auth":{"token":"t1"},"id":42}"#, &v).unwrap();
         assert_eq!(fill("{{token}}/{{id}}", &v), "t1/42");
         // A later extraction overwrites, e.g. after a re-login.
-        extract(&step, br#"{"auth":{"token":"t2"},"id":42}"#, &v).unwrap();
+        extract(&step, &h, br#"{"auth":{"token":"t2"},"id":42}"#, &v).unwrap();
         assert_eq!(fill("{{token}}", &v), "t2");
-        let e = extract(&step, br#"{"auth":{},"id":"secret-id"}"#, &v).unwrap_err();
+        let e = extract(&step, &h, br#"{"auth":{},"id":"secret-id"}"#, &v).unwrap_err();
         assert_eq!(e, "extract token: /auth/token not found");
         assert!(
-            extract(&step, b"<html>", &v)
+            extract(&step, &h, b"<html>", &v)
                 .unwrap_err()
                 .contains("not JSON")
         );
@@ -725,6 +766,46 @@ mod tests {
             "t2",
             "failed extraction keeps old values"
         );
+    }
+
+    #[test]
+    fn extracts_from_headers_and_cookies() {
+        let mut h = HeaderMap::new();
+        h.insert("authorization", "BEARER  abc.def.ghi".parse().unwrap());
+        h.insert("x-auth-token", "raw-token".parse().unwrap());
+        h.append(SET_COOKIE, "other=1; Path=/".parse().unwrap());
+        h.append(
+            SET_COOKIE,
+            "jwt=eyJ.x.y; Path=/; HttpOnly; Secure".parse().unwrap(),
+        );
+        let step = Step {
+            extract: vec![
+                ("a".into(), "header:Authorization".into()),
+                ("b".into(), "header:X-AUTH-TOKEN".into()),
+                ("c".into(), "cookie:jwt".into()),
+            ],
+            ..Default::default()
+        };
+        let v = Vars::default();
+        // No JSON source: a non-JSON body is fine.
+        extract(&step, &h, b"<html>", &v).unwrap();
+        assert_eq!(
+            fill("{{a}}|{{b}}|{{c}}", &v),
+            "abc.def.ghi|raw-token|eyJ.x.y"
+        );
+
+        for (spec, err) in [
+            ("header:X-Missing", "extract a: header:X-Missing not found"),
+            ("cookie:none", "extract a: cookie:none not found"),
+        ] {
+            let step = Step {
+                extract: vec![("a".into(), spec.into())],
+                ..Default::default()
+            };
+            assert_eq!(extract(&step, &h, b"", &v).unwrap_err(), err);
+        }
+        assert_eq!(strip_bearer("Bearer"), "Bearer");
+        assert_eq!(strip_bearer(" bearer xyz "), "xyz");
     }
 
     #[test]

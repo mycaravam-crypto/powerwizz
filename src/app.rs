@@ -939,8 +939,9 @@ fn steps_editor(ui: &mut Ui, salt: &str, steps: &mut Vec<Step>) {
                         );
                         ui.horizontal(|ui| {
                             key(ui, "extrahieren").on_hover_text(
-                                "Werte aus der JSON-Antwort, je Zeile name = /json/pointer; \
-                                 danach als {{name}} nutzbar, z. B. token = /access_token",
+                                "Werte aus der Antwort, je Zeile name = quelle; danach als {{name}} nutzbar.\n\
+                                 quelle: /json/pointer · header:Name (\"Bearer \" wird entfernt) · cookie:name\n\
+                                 z. B. token = /access_token oder token = header:Authorization",
                             );
                             pair_lines(ui, "extract", &mut s.extract, '=', "token = /access_token");
                         });

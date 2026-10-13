@@ -142,6 +142,43 @@ async fn jwt_sample_uses_bearer_tokens() {
     assert!(stats.orders.load(Ordering::Relaxed) > 0);
 }
 
+/// The token comes back only as `Authorization` header and `jwt` cookie.
+async fn run_with_source(source: &str) {
+    let (base, stats) = serve(fast()).await;
+    let mut d = shortened("examples/mockapp/test-jwt.json", &base);
+    d.users = 5;
+    d.login_steps[0].url = "/api/token?via=header".into();
+    d.login_steps[0].expected_status = vec![204];
+    d.login_steps[0].extract = vec![("token".into(), source.into())];
+    assert!(d.validate().is_empty(), "{:?}", d.validate());
+    let accounts = model::load_accounts("examples/mockapp/accounts.csv").unwrap();
+    let mut h = start(d, accounts, true).unwrap();
+    h.wait().await;
+    let m = h.shared.metrics.lock().unwrap();
+    assert_eq!(m.failures, 0, "{source}: {:?}", m.errors);
+    assert!(m.requests > 5);
+    let tokens = stats.tokens.lock().unwrap().clone();
+    assert_eq!(tokens.len(), 5);
+    let records = powerwizz::metrics::records_csv(&m);
+    drop(m);
+    let report = h.shared.report_json();
+    assert!(
+        tokens
+            .iter()
+            .all(|t| !records.contains(t.as_str()) && !report.contains(t.as_str()))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn jwt_from_response_header() {
+    run_with_source("header:Authorization").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn jwt_from_set_cookie() {
+    run_with_source("cookie:jwt").await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn expired_tokens_trigger_relogin_and_never_leak() {
     let (base, stats) = serve(app::Config {

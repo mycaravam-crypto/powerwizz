@@ -20,7 +20,7 @@ CI (GitHub Actions, `windows-latest`) runs `cargo fmt --check`, `cargo clippy --
 1. Set base URL, virtual users, ramp-up, duration, optional request limit and timeout.
 2. Edit scenarios: ordered HTTP steps (method, path or URL, headers as `Name: value` lines, body, pause range, expected status codes; empty = 2xx). Each iteration picks a scenario at random.
 3. Optional login: no login, shared account, or one account per virtual user imported from a CSV (`username,password`). Login/registration steps run once per user (and again after a 401, e.g. when a session or JWT expired) and may use `{{username}}`, `{{password}}` and `{{vu_id}}`.
-   - **JWT / tokens:** a step's *extrahieren* field takes values from its JSON response, one `name = /json/pointer` per line (e.g. `token = /access_token`). Later requests of that user use them as `{{name}}`, typically as default header `Authorization: Bearer {{token}}`. Headers whose placeholders aren't filled yet (the login request itself) are not sent. Unknown placeholders are validation errors.
+   - **JWT / tokens:** a step's *extrahieren* field takes values from its response, one `name = source` per line. Source is a JSON pointer into the body (`token = /access_token`), a response header (`token = header:Authorization`, case-insensitive, a leading `Bearer ` is stripped; the first header of that name wins) or a cookie the response sets (`token = cookie:jwt`, value without attributes). Later requests of that user use them as `{{name}}`, typically as default header `Authorization: Bearer {{token}}`. Headers whose placeholders aren't filled yet (the login request itself) are not sent. Unknown placeholders are validation errors.
 4. Start shows a confirmation with target and load; non-local hosts get an extra warning.
 
 5. After the test, export CSV: `<name>-zusammenfassung.csv` (total + per step: requests, failures, error rate, RPS, mean/p50/p95/p99, status codes and error kinds) and, if request details were enabled, `<name>-requests.csv` (max. 100 000 rows).
@@ -45,6 +45,7 @@ Then in powerwizz: load `examples/mockapp/test.json` (session cookie) or `exampl
 |---|---|
 | `POST /api/login` | JSON `{"username","password"}` → 200 + `sid` cookie, 401 on bad credentials |
 | `POST /api/token` | same credentials → `{"access_token","token_type":"Bearer","expires_in":300}`; JWT-shaped, expires |
+| `POST /api/token?via=header` | same, but 204 with the token only in `Authorization: Bearer …` and `Set-Cookie: jwt=…` |
 | `GET /api/items`, `GET /api/items/{id}` | 5–40 ms latency; 404 for id ≥ 1000 |
 | `POST /api/orders` | JSON `{"item","qty"}` → 201; 400 on bad input; 500 for 1 % |
 | `GET /api/slow` | 300–800 ms |
@@ -86,7 +87,7 @@ A versioned, machine-readable result file, in the same spirit as `gitwizz.histor
 `cargo test` runs unit tests and integration tests. Integration tests need no external server:
 
 - `tests/common/mod.rs`: tiny HTTP/1.1 server with synthetic routes (status, delay, cookies, dropped connections) for engine edge cases.
-- `tests/mockapp.rs`: the shipped sample (`examples/mockapp/test.json` + `accounts.csv`) end to end against the mock web shop: per-user login, all scenarios clean, 401 without login, 429/500 counted, CSRF form rejected; JWT sample with bearer tokens, token expiry → re-login, no token in any export.
+- `tests/mockapp.rs`: the shipped sample (`examples/mockapp/test.json` + `accounts.csv`) end to end against the mock web shop: per-user login, all scenarios clean, 401 without login, 429/500 counted, CSRF form rejected; JWT sample with bearer tokens from JSON, response header and Set-Cookie, token expiry → re-login, no token in any export.
 
 ## Measurements
 
@@ -126,7 +127,7 @@ RAM stays flat with users and request count (bounded metrics). Latency growth re
 
 ## Known limitations
 
-- Values can only be extracted from JSON responses: a CSRF token inside an HTML form or a response header is not supported.
+- Values can be extracted from JSON bodies, response headers and Set-Cookie, not from HTML: a CSRF token inside a form is not supported. No regex or partial header values.
 - Placeholders: `{{username}}`, `{{password}}`, `{{vu_id}}` and extracted names; no expressions.
 - Expired tokens are detected by a 401, not by decoding the JWT's `exp`; the request that got the 401 is counted as failed.
 - Percentiles ±2.5 % (log histogram, clamped to 100 µs–60 s).

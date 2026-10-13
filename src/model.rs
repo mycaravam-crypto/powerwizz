@@ -50,8 +50,9 @@ pub struct Step {
     pub pause_max_ms: u64,
     /// Empty means any 2xx.
     pub expected_status: Vec<u16>,
-    /// Values taken from a JSON response: (variable name, JSON pointer such as
-    /// `/access_token`). Later steps of the same user use them as `{{name}}`.
+    /// Values taken from the response: (variable name, source). Source is a JSON
+    /// pointer (`/access_token`), `header:Name` or `cookie:name`, see [`ExtractSource`].
+    /// Later steps of the same user use them as `{{name}}`.
     pub extract: Vec<(String, String)>,
 }
 
@@ -309,6 +310,32 @@ pub fn resolve_url(base: &Url, url: &str) -> Result<Url, String> {
     u.map_err(|e| e.to_string())
 }
 
+/// Where an extracted value comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtractSource<'a> {
+    /// JSON pointer into the body; `""` is the whole document.
+    Json(&'a str),
+    /// First response header with this name (case-insensitive); a leading
+    /// `Bearer ` is stripped.
+    Header(&'a str),
+    /// Value of the `Set-Cookie` with this name, without attributes.
+    Cookie(&'a str),
+}
+
+impl<'a> ExtractSource<'a> {
+    pub fn parse(spec: &'a str) -> Option<Self> {
+        if let Some(name) = spec.strip_prefix("header:") {
+            (!name.trim().is_empty()).then(|| ExtractSource::Header(name.trim()))
+        } else if let Some(name) = spec.strip_prefix("cookie:") {
+            (!name.trim().is_empty()).then(|| ExtractSource::Cookie(name.trim()))
+        } else if spec.is_empty() || spec.starts_with('/') {
+            Some(ExtractSource::Json(spec))
+        } else {
+            None
+        }
+    }
+}
+
 /// Placeholders every user has; extracted variables add to these.
 pub const BUILTIN_VARS: [&str; 3] = ["username", "password", "vu_id"];
 
@@ -341,8 +368,10 @@ fn check_step(label: &str, s: &Step, base: Option<&Url>, known: &[&str], errs: &
         if !valid_name {
             errs.push(format!("{label}: invalid variable name '{name}'"));
         }
-        if !(pointer.is_empty() || pointer.starts_with('/')) {
-            errs.push(format!("{label}: JSON pointer must start with '/'"));
+        if ExtractSource::parse(pointer).is_none() {
+            errs.push(format!(
+                "{label}: extract source must be /json/pointer, header:Name or cookie:name"
+            ));
         }
     }
     // Placeholders are replaced at runtime; validate with a neutral stand-in.
@@ -443,7 +472,22 @@ mod tests {
         let errs = d.validate();
         assert!(errs.iter().any(|e| e.contains("'password'")));
         assert!(errs.iter().any(|e| e.contains("'a-b'")));
-        assert!(errs.iter().any(|e| e.contains("JSON pointer")));
+        assert!(errs.iter().any(|e| e.contains("extract source")));
+    }
+
+    #[test]
+    fn parses_extract_sources() {
+        use ExtractSource::*;
+        assert_eq!(ExtractSource::parse("/a/0"), Some(Json("/a/0")));
+        assert_eq!(ExtractSource::parse(""), Some(Json("")));
+        assert_eq!(
+            ExtractSource::parse("header: X-Auth-Token"),
+            Some(Header("X-Auth-Token"))
+        );
+        assert_eq!(ExtractSource::parse("cookie:jwt"), Some(Cookie("jwt")));
+        for bad in ["header:", "cookie: ", "access_token", "body:/x"] {
+            assert_eq!(ExtractSource::parse(bad), None, "{bad}");
+        }
     }
 
     #[test]
