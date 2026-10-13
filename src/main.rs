@@ -10,6 +10,7 @@ fn main() -> eframe::Result {
         "powerwizz",
         eframe::NativeOptions {
             viewport: eframe::egui::ViewportBuilder::default()
+                .with_title(concat!("powerwizz ", env!("CARGO_PKG_VERSION")))
                 .with_inner_size([1400.0, 900.0])
                 .with_min_inner_size([900.0, 600.0]),
             ..Default::default()
