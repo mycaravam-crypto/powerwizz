@@ -298,7 +298,7 @@ impl App {
             if d.auth != AuthStrategy::None {
                 hint(
                     ui,
-                    "login-/registrierungsschritte, einmal pro benutzer · {{username}} {{password}} {{vu_id}}",
+                    "login-/registrierungsschritte, einmal pro benutzer und erneut bei 401 · {{username}} {{password}} {{vu_id}} + extrahierte werte (z. B. jwt)",
                     MUTED,
                 );
                 steps_editor(ui, "login", &mut d.login_steps);
@@ -661,8 +661,8 @@ fn fmt_ms(d: Duration) -> String {
 
 // ---------- widgets (after reswizz) ----------
 
-fn key(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text).color(MUTED).size(12.0));
+fn key(ui: &mut Ui, text: &str) -> egui::Response {
+    ui.label(RichText::new(text).color(MUTED).size(12.0))
 }
 
 fn hint(ui: &mut Ui, text: &str, color: Color32) {
@@ -921,7 +921,13 @@ fn steps_editor(ui: &mut Ui, salt: &str, steps: &mut Vec<Step>) {
                         }
                     });
                     egui::CollapsingHeader::new(
-                        RichText::new("header / body").color(MUTED).size(12.0),
+                        RichText::new(if s.extract.is_empty() {
+                            "header / body / extrahieren".to_string()
+                        } else {
+                            format!("header / body / extrahieren ({})", s.extract.len())
+                        })
+                        .color(MUTED)
+                        .size(12.0),
                     )
                     .show(ui, |ui| {
                         header_lines(ui, "headers", &mut s.headers);
@@ -931,6 +937,13 @@ fn steps_editor(ui: &mut Ui, salt: &str, steps: &mut Vec<Step>) {
                                 .desired_rows(2)
                                 .hint_text("Body (Text/JSON)"),
                         );
+                        ui.horizontal(|ui| {
+                            key(ui, "extrahieren").on_hover_text(
+                                "Werte aus der JSON-Antwort, je Zeile name = /json/pointer; \
+                                 danach als {{name}} nutzbar, z. B. token = /access_token",
+                            );
+                            pair_lines(ui, "extract", &mut s.extract, '=', "token = /access_token");
+                        });
                     });
                 });
             });
@@ -956,7 +969,8 @@ fn buffered<T>(
     ui: &mut Ui,
     salt: &str,
     value: &mut T,
-    multiline: bool,
+    // Some(hint) = multi-line field with that placeholder text.
+    multiline: Option<&str>,
     to_text: impl Fn(&T) -> String,
     parse: impl Fn(&str) -> Option<T>,
 ) {
@@ -968,10 +982,10 @@ fn buffered<T>(
         st = (canonical.clone(), canonical);
     }
     let color = parse(&st.0).is_none().then_some(ERR);
-    let edit = if multiline {
+    let edit = if let Some(hint) = multiline {
         egui::TextEdit::multiline(&mut st.0)
             .desired_rows(1)
-            .hint_text("Name: Wert")
+            .hint_text(hint)
     } else {
         egui::TextEdit::singleline(&mut st.0).desired_width(80.0)
     };
@@ -990,7 +1004,7 @@ fn status_list(ui: &mut Ui, codes: &mut Vec<u16>) {
         ui,
         "status",
         codes,
-        false,
+        None,
         |c| c.iter().map(u16::to_string).collect::<Vec<_>>().join(","),
         |t| {
             t.split(',')
@@ -1003,14 +1017,19 @@ fn status_list(ui: &mut Ui, codes: &mut Vec<u16>) {
 }
 
 fn header_lines(ui: &mut Ui, salt: &str, headers: &mut Vec<(String, String)>) {
+    pair_lines(ui, salt, headers, ':', "Name: Wert");
+}
+
+/// One `key<sep> value` pair per line.
+fn pair_lines(ui: &mut Ui, salt: &str, pairs: &mut Vec<(String, String)>, sep: char, hint: &str) {
     buffered(
         ui,
         salt,
-        headers,
-        true,
+        pairs,
+        Some(hint),
         |h| {
             h.iter()
-                .map(|(k, v)| format!("{k}: {v}"))
+                .map(|(k, v)| format!("{k}{sep} {v}"))
                 .collect::<Vec<_>>()
                 .join("\n")
         },
@@ -1018,7 +1037,7 @@ fn header_lines(ui: &mut Ui, salt: &str, headers: &mut Vec<(String, String)>) {
             t.lines()
                 .filter(|l| !l.trim().is_empty())
                 .map(|l| {
-                    l.split_once(':')
+                    l.split_once(sep)
                         .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
                 })
                 .collect()

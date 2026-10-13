@@ -23,12 +23,17 @@ fn fast() -> app::Config {
         slow_ms: (10, 20),
         error_rate: 0.0,
         rate_limit: 0,
+        token_ttl_s: 300,
     }
 }
 
 /// The shipped sample, shortened: 20 users, 3 s, short pauses.
 fn sample(base: &str) -> TestDefinition {
-    let mut d = TestDefinition::load("examples/mockapp/test.json").unwrap();
+    shortened("examples/mockapp/test.json", base)
+}
+
+fn shortened(path: &str, base: &str) -> TestDefinition {
+    let mut d = TestDefinition::load(path).unwrap();
     d.base_url = base.into();
     (d.users, d.ramp_up_secs, d.duration_secs) = (20, 1, 3);
     for s in d
@@ -118,6 +123,102 @@ async fn rate_limit_and_injected_errors_are_counted() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn jwt_sample_uses_bearer_tokens() {
+    let (base, stats) = serve(fast()).await;
+    let d = shortened("examples/mockapp/test-jwt.json", &base);
+    assert!(d.validate().is_empty(), "{:?}", d.validate());
+    let accounts = model::load_accounts("examples/mockapp/accounts.csv").unwrap();
+    let mut h = start(d, accounts, false).unwrap();
+    h.wait().await;
+    let m = h.shared.metrics.lock().unwrap();
+    assert_eq!(m.failures, 0, "{:?}", m.errors);
+    assert_eq!(stats.tokens.lock().unwrap().len(), 20, "one token per user");
+    assert_eq!(
+        stats.logins.load(Ordering::Relaxed),
+        0,
+        "no cookie sessions"
+    );
+    assert!(stats.orders.load(Ordering::Relaxed) > 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn expired_tokens_trigger_relogin_and_never_leak() {
+    let (base, stats) = serve(app::Config {
+        token_ttl_s: 1,
+        ..fast()
+    })
+    .await;
+    let mut d = shortened("examples/mockapp/test-jwt.json", &base);
+    (d.users, d.duration_secs) = (5, 4);
+    let accounts = model::load_accounts("examples/mockapp/accounts.csv").unwrap();
+    let mut h = start(d, accounts, true).unwrap();
+    h.wait().await;
+
+    let tokens = stats.tokens.lock().unwrap().clone();
+    assert!(
+        tokens.len() > 5,
+        "expected re-logins, got {} tokens",
+        tokens.len()
+    );
+    let m = h.shared.metrics.lock().unwrap();
+    // Every failure is an expired token, and users kept working afterwards.
+    assert!(m.failures > 0);
+    assert_eq!(m.status_counts.get(&401).copied(), Some(m.failures));
+    assert_eq!(m.per_step["login/token"].requests as usize, tokens.len());
+    let late_ok = m
+        .records
+        .iter()
+        .any(|r| r.at > Duration::from_secs(2) && r.status == Some(200));
+    assert!(late_ok, "no successful requests after the first expiry");
+
+    let summary = powerwizz::metrics::summary_csv(&m, h.shared.runtime());
+    let records = powerwizz::metrics::records_csv(&m);
+    let errors: String = m.errors.iter().map(|e| e.message.clone()).collect();
+    drop(m);
+    let report = h.shared.report_json();
+    for t in &tokens {
+        for (name, text) in [
+            ("summary", &summary),
+            ("records", &records),
+            ("errors", &errors),
+            ("report", &report),
+        ] {
+            assert!(!text.contains(t.as_str()), "token leaked into {name}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn missing_json_value_fails_the_step_without_leaking() {
+    let (base, _) = serve(fast()).await;
+    let base = Url::parse(&base).unwrap();
+    let client = new_client(Duration::from_secs(5));
+    let vars = Vars {
+        username: "user1".into(),
+        password: "pw1".into(),
+        ..Default::default()
+    };
+    let ctx = StepCtx {
+        client: &client,
+        base: &base,
+        default_headers: &[],
+        vars: &vars,
+        start: Instant::now(),
+    };
+    let step = Step {
+        method: Method::Post,
+        url: "/api/token".into(),
+        body: r#"{"username":"{{username}}","password":"{{password}}"}"#.into(),
+        extract: vec![("token".into(), "/token".into())],
+        ..Default::default()
+    };
+    let r = run_step(&ctx, "login", &step).await;
+    assert_eq!((r.status, r.error), (Some(200), Some(ErrorKind::Other)));
+    assert_eq!(r.message, "extract token: /token not found");
+    assert!(vars.extracted.lock().unwrap().is_empty());
+}
+
 /// Documents the v1 limitation: powerwizz can't carry a CSRF token from one
 /// response into the next request, so a CSRF-protected form login fails.
 #[tokio::test]
@@ -129,6 +230,7 @@ async fn csrf_form_login_is_rejected_without_token() {
         username: "user0".into(),
         password: "pw0".into(),
         vu_id: 0,
+        ..Default::default()
     };
     let ctx = StepCtx {
         client: &client,

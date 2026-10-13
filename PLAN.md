@@ -74,7 +74,7 @@ Vor dem Hinzufügen weiterer Crates prüfen, ob eine bestehende Dependency die F
 - Benutzerverwaltung im Zielsystem außerhalb explizit konfigurierter HTTP-Schritte.
 - CAPTCHA-, MFA- oder sonstige Umgehung von Schutzmechanismen.
 - Automatische Erkennung von Navigationspfaden.
-- Extraktion von Werten aus Responses (z. B. CSRF-Tokens). Logins, die ein Token aus einer vorherigen Response benötigen, werden in v1 nicht unterstützt – das ist eine dokumentierte Einschränkung und der erste Kandidat für v2.
+- Extraktion aus HTML oder Response-Headern (z. B. CSRF-Token in einem Formular). Werte aus **JSON**-Antworten (z. B. JWT) werden seit #27 unterstützt, siehe §6.
 - Cloud-Dienste, Accounts, Telemetrie, Lizenzserver, Datenbank.
 - Scripting-Sprache, Plugin-System, Variablen-Engine (Ausnahme: die festen Platzhalter aus §6) oder Workflow-IDE.
 - HTTP/3, WebSockets, Browser-Rendering.
@@ -96,7 +96,7 @@ Verbindungen werden innerhalb eines VU wiederverwendet (Keep-Alive des eigenen C
 
 1. Start zum Ramp-up-Zeitpunkt.
 2. Optional: Login-Schritte einmal ausführen. Schlägt ein Login-Schritt fehl, wird der Fehler gezählt und der VU beendet sich (kein Retry).
-3. Iteration: Szenario wählen und Schritte der Reihe nach ausführen. Schlägt ein Schritt fehl (Transportfehler, Timeout oder unerwarteter Status), wird der Fehler gezählt und die **aktuelle Iteration** abgebrochen.
+3. Iteration: Szenario wählen und Schritte der Reihe nach ausführen. Schlägt ein Schritt fehl (Transportfehler, Timeout oder unerwarteter Status), wird der Fehler gezählt und die **aktuelle Iteration** abgebrochen. Antwortet ein Schritt unerwartet mit **401** und es gibt Login-Schritte, meldet sich der VU neu an (abgelaufene Session/JWT) und setzt mit der nächsten Iteration fort; der 401 zählt als Fehler, der Request wird nicht wiederholt. Folgt direkt auf eine Neuanmeldung wieder ein 401, gilt das normale Fehlerverhalten (kein Login-Sturm).
 4. Nächste Iteration, bis Testdauer abgelaufen, Request-Limit erreicht oder Stop ausgelöst.
 
 Konfigurierbar ist in v1 nur: „bei Fehler Iteration abbrechen“ (Standard) oder „bei Fehler VU beenden“.
@@ -118,7 +118,9 @@ Authentifizierungsstrategien (eine pro Test):
 - **Gemeinsamer Account** – alle VUs nutzen dieselben Zugangsdaten. Nur sinnvoll, wenn das Zielsystem parallele Sessions eines Accounts unterstützt; die UI weist darauf hin.
 - **Account pro VU** – Zugangsdaten aus einer CSV-Datei (`username,password`, Header-Zeile). VU *i* erhält Zeile *i*. Gibt es weniger Zeilen als VUs, ist der Start nicht möglich (Validierungsfehler).
 
-Login- und optionale Registrierungsschritte sind normale HTTP-Schritte. In URL, Headern und Body werden ausschließlich diese festen Platzhalter ersetzt: `{{username}}`, `{{password}}`, `{{vu_id}}`. Keine weitere Template-Logik.
+Login- und optionale Registrierungsschritte sind normale HTTP-Schritte. In URL, Headern und Body werden ersetzt: die festen Platzhalter `{{username}}`, `{{password}}`, `{{vu_id}}` sowie extrahierte Werte. Keine weitere Template-Logik.
+
+**JWT / Token aus JSON-Antworten (#27):** Ein Schritt kann mit `extract` (Zeilen `name = /json/pointer`) Werte aus seiner JSON-Antwort übernehmen; sie gelten pro VU als `{{name}}` (z. B. Standard-Header `Authorization: Bearer {{token}}`). Header mit noch unbelegten Platzhaltern werden nicht gesendet. Unbekannte Platzhalter sind Validierungsfehler. Extrahierte Werte bleiben im Speicher des VU und erscheinen nie in Records, Exporten oder Fehlermeldungen.
 
 Regeln:
 

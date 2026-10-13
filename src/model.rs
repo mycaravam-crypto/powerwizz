@@ -50,6 +50,9 @@ pub struct Step {
     pub pause_max_ms: u64,
     /// Empty means any 2xx.
     pub expected_status: Vec<u16>,
+    /// Values taken from a JSON response: (variable name, JSON pointer such as
+    /// `/access_token`). Later steps of the same user use them as `{{name}}`.
+    pub extract: Vec<(String, String)>,
 }
 
 impl Default for Step {
@@ -63,6 +66,7 @@ impl Default for Step {
             pause_min_ms: 0,
             pause_max_ms: 0,
             expected_status: Vec::new(),
+            extract: Vec::new(),
         }
     }
 }
@@ -186,6 +190,16 @@ impl TestDefinition {
             errs.push("Timeout must be 1..=300 s".into());
         }
         check_headers("Default headers", &self.headers, &mut errs);
+        let steps = || {
+            self.login_steps
+                .iter()
+                .chain(self.scenarios.iter().flat_map(|s| &s.steps))
+        };
+        let mut known: Vec<&str> = BUILTIN_VARS.to_vec();
+        known.extend(steps().flat_map(|s| s.extract.iter().map(|(n, _)| n.as_str())));
+        for (_, v) in &self.headers {
+            check_placeholders("Default headers", v, &known, &mut errs);
+        }
         match self.auth {
             AuthStrategy::None => {}
             AuthStrategy::Shared if self.shared_username.trim().is_empty() => {
@@ -201,6 +215,7 @@ impl TestDefinition {
                 &format!("Login step {}", i + 1),
                 s,
                 base.as_ref(),
+                &known,
                 &mut errs,
             );
         }
@@ -216,6 +231,7 @@ impl TestDefinition {
                     &format!("'{}' step {}", sc.name, i + 1),
                     s,
                     base.as_ref(),
+                    &known,
                     &mut errs,
                 );
             }
@@ -293,7 +309,42 @@ pub fn resolve_url(base: &Url, url: &str) -> Result<Url, String> {
     u.map_err(|e| e.to_string())
 }
 
-fn check_step(label: &str, s: &Step, base: Option<&Url>, errs: &mut Vec<String>) {
+/// Placeholders every user has; extracted variables add to these.
+pub const BUILTIN_VARS: [&str; 3] = ["username", "password", "vu_id"];
+
+/// Names used as `{{name}}` in `s`.
+pub fn placeholders(s: &str) -> impl Iterator<Item = &str> {
+    s.split("{{")
+        .skip(1)
+        .filter_map(|rest| rest.split_once("}}").map(|(name, _)| name))
+}
+
+fn check_placeholders(label: &str, s: &str, known: &[&str], errs: &mut Vec<String>) {
+    for name in placeholders(s) {
+        if !known.contains(&name) {
+            errs.push(format!("{label}: unknown placeholder {{{{{name}}}}}"));
+        }
+    }
+}
+
+fn check_step(label: &str, s: &Step, base: Option<&Url>, known: &[&str], errs: &mut Vec<String>) {
+    for text in [&s.url, &s.body]
+        .into_iter()
+        .chain(s.headers.iter().map(|(_, v)| v))
+    {
+        check_placeholders(label, text, known, errs);
+    }
+    for (name, pointer) in &s.extract {
+        let valid_name = !name.is_empty()
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && !BUILTIN_VARS.contains(&name.as_str());
+        if !valid_name {
+            errs.push(format!("{label}: invalid variable name '{name}'"));
+        }
+        if !(pointer.is_empty() || pointer.starts_with('/')) {
+            errs.push(format!("{label}: JSON pointer must start with '/'"));
+        }
+    }
     // Placeholders are replaced at runtime; validate with a neutral stand-in.
     let url = s
         .url
@@ -363,6 +414,42 @@ mod tests {
                 "missing {needle}: {errs:?}"
             );
         }
+    }
+
+    #[test]
+    fn placeholders_and_extract_are_validated() {
+        let mut d = TestDefinition::default();
+        d.scenarios[0].steps[0].url = "/x/{{vu_id}}/{{token}}".into();
+        assert!(
+            d.validate()
+                .iter()
+                .any(|e| e.contains("unknown placeholder {{token}}"))
+        );
+        d.headers = vec![("Authorization".into(), "Bearer {{tokn}}".into())];
+        d.login_steps = vec![Step {
+            extract: vec![("token".into(), "/access_token".into())],
+            ..Default::default()
+        }];
+        let errs = d.validate();
+        assert!(!errs.iter().any(|e| e.contains("{{token}}")), "{errs:?}");
+        assert!(errs.iter().any(|e| e.contains("{{tokn}}")), "{errs:?}");
+        d.headers.clear();
+        assert_eq!(d.validate(), Vec::<String>::new());
+        d.login_steps[0].extract = vec![
+            ("password".into(), "/p".into()),
+            ("a-b".into(), "/x".into()),
+            ("ok".into(), "x".into()),
+        ];
+        let errs = d.validate();
+        assert!(errs.iter().any(|e| e.contains("'password'")));
+        assert!(errs.iter().any(|e| e.contains("'a-b'")));
+        assert!(errs.iter().any(|e| e.contains("JSON pointer")));
+    }
+
+    #[test]
+    fn finds_placeholders() {
+        let names: Vec<_> = placeholders("a {{x}} b {{y_1}} {{unterminated").collect();
+        assert_eq!(names, ["x", "y_1"]);
     }
 
     #[test]

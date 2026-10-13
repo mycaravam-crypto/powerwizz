@@ -19,14 +19,15 @@ CI (GitHub Actions, `windows-latest`) runs `cargo fmt --check`, `cargo clippy --
 
 1. Set base URL, virtual users, ramp-up, duration, optional request limit and timeout.
 2. Edit scenarios: ordered HTTP steps (method, path or URL, headers as `Name: value` lines, body, pause range, expected status codes; empty = 2xx). Each iteration picks a scenario at random.
-3. Optional login: no login, shared account, or one account per virtual user imported from a CSV (`username,password`). Login/registration steps run once per user and may use `{{username}}`, `{{password}}` and `{{vu_id}}`.
+3. Optional login: no login, shared account, or one account per virtual user imported from a CSV (`username,password`). Login/registration steps run once per user (and again after a 401, e.g. when a session or JWT expired) and may use `{{username}}`, `{{password}}` and `{{vu_id}}`.
+   - **JWT / tokens:** a step's *extrahieren* field takes values from its JSON response, one `name = /json/pointer` per line (e.g. `token = /access_token`). Later requests of that user use them as `{{name}}`, typically as default header `Authorization: Bearer {{token}}`. Headers whose placeholders aren't filled yet (the login request itself) are not sent. Unknown placeholders are validation errors.
 4. Start shows a confirmation with target and load; non-local hosts get an extra warning.
 
 5. After the test, export CSV: `<name>-zusammenfassung.csv` (total + per step: requests, failures, error rate, RPS, mean/p50/p95/p99, status codes and error kinds) and, if request details were enabled, `<name>-requests.csv` (max. 100 000 rows).
 
 6. Or save a JSON report `<name>-bericht.json` (`powerwizz.report/v1`, see below), e.g. for docwizz.
 
-Test definitions are saved as JSON without passwords. Credentials stay in memory only. Exports never contain passwords, cookies, headers, bodies, error messages or query strings; paths come from the step template (`/user/{{username}}`), not the filled-in URL.
+Test definitions are saved as JSON without passwords. Credentials stay in memory only. Exports never contain passwords, cookies, headers, bodies, error messages or query strings; paths come from the step template (`/user/{{username}}`), not the filled-in URL. Extracted values (tokens) stay in the user's memory only.
 
 Percentiles come from a fixed log histogram (100 µs–60 s); they are accurate to about ±2.5 %.
 
@@ -38,18 +39,19 @@ Percentiles come from a fixed log histogram (100 µs–60 s); they are accurate 
 cargo run --example mockapp            # http://127.0.0.1:8080, or pass another address
 ```
 
-Then in powerwizz: load `examples/mockapp/test.json`, choose *Account pro Benutzer* and import `examples/mockapp/accounts.csv` (500 accounts `userN` / `pwN`; the app accepts `user0`…`user999`).
+Then in powerwizz: load `examples/mockapp/test.json` (session cookie) or `examples/mockapp/test-jwt.json` (bearer token from `/api/token`), choose *Account pro Benutzer* and import `examples/mockapp/accounts.csv` (500 accounts `userN` / `pwN`; the app accepts `user0`…`user999`).
 
 | Route | Behaviour |
 |---|---|
 | `POST /api/login` | JSON `{"username","password"}` → 200 + `sid` cookie, 401 on bad credentials |
+| `POST /api/token` | same credentials → `{"access_token","token_type":"Bearer","expires_in":300}`; JWT-shaped, expires |
 | `GET /api/items`, `GET /api/items/{id}` | 5–40 ms latency; 404 for id ≥ 1000 |
 | `POST /api/orders` | JSON `{"item","qty"}` → 201; 400 on bad input; 500 for 1 % |
 | `GET /api/slow` | 300–800 ms |
 | `POST /api/logout` | 204 |
 | `GET /login`, `POST /login` | HTML form with CSRF token; without the token → 403 (powerwizz v1 can't carry it over, see limitations) |
 
-All `/api/*` routes except login answer 401 without a session and 429 above 20 requests per second and session.
+All `/api/*` routes except login/token answer 401 without a session cookie or valid bearer token and 429 above 20 requests per second and session.
 
 ## JSON report (`powerwizz.report/v1`)
 
@@ -84,7 +86,7 @@ A versioned, machine-readable result file, in the same spirit as `gitwizz.histor
 `cargo test` runs unit tests and integration tests. Integration tests need no external server:
 
 - `tests/common/mod.rs`: tiny HTTP/1.1 server with synthetic routes (status, delay, cookies, dropped connections) for engine edge cases.
-- `tests/mockapp.rs`: the shipped sample (`examples/mockapp/test.json` + `accounts.csv`) end to end against the mock web shop: per-user login, all scenarios clean, 401 without login, 429/500 counted, CSRF form rejected.
+- `tests/mockapp.rs`: the shipped sample (`examples/mockapp/test.json` + `accounts.csv`) end to end against the mock web shop: per-user login, all scenarios clean, 401 without login, 429/500 counted, CSRF form rejected; JWT sample with bearer tokens, token expiry → re-login, no token in any export.
 
 ## Measurements
 
@@ -124,8 +126,9 @@ RAM stays flat with users and request count (bounded metrics). Latency growth re
 
 ## Known limitations
 
-- No value extraction from responses: logins that need a CSRF token from a previous response are not supported.
-- Only `{{username}}`, `{{password}}`, `{{vu_id}}` placeholders.
+- Values can only be extracted from JSON responses: a CSRF token inside an HTML form or a response header is not supported.
+- Placeholders: `{{username}}`, `{{password}}`, `{{vu_id}}` and extracted names; no expressions.
+- Expired tokens are detected by a 401, not by decoding the JWT's `exp`; the request that got the 401 is counted as failed.
 - Percentiles ±2.5 % (log histogram, clamped to 100 µs–60 s).
 - Requests in flight when the test ends or is stopped are aborted and not counted.
 - `MAX_USERS = 500`, max duration 1 h, request details capped at 100 000 rows, last 200 errors kept.
