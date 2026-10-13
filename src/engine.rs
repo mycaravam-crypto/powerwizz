@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use reqwest::Url;
@@ -194,6 +194,7 @@ pub struct Shared {
     /// Requests issued so far, for the global request limit.
     issued: AtomicU64,
     request_limit: Option<u64>,
+    ended: OnceLock<Duration>,
 }
 
 impl Shared {
@@ -203,6 +204,11 @@ impl Shared {
 
     pub fn elapsed(&self) -> Duration {
         self.start.elapsed()
+    }
+
+    /// Test runtime: frozen once the test has finished.
+    pub fn runtime(&self) -> Duration {
+        self.ended.get().copied().unwrap_or_else(|| self.elapsed())
     }
 
     fn limit_reached(&self) -> bool {
@@ -271,6 +277,7 @@ pub fn start(
         stop,
         issued: AtomicU64::new(0),
         request_limit: def.request_limit,
+        ended: OnceLock::new(),
     });
     let (tx, rx) = mpsc::channel(CHANNEL_CAP);
     let aggregator = tokio::spawn(aggregate(shared.clone(), rx));
@@ -352,6 +359,7 @@ async fn control(
     users.join_all().await;
     drop(tx);
     let _ = aggregator.await;
+    let _ = shared.ended.set(shared.elapsed());
     shared.set_status(Status::Finished);
 }
 
