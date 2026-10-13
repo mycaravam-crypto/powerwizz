@@ -188,6 +188,109 @@ impl Metrics {
     }
 }
 
+fn ms(d: Duration) -> String {
+    format!("{:.3}", d.as_secs_f64() * 1000.0)
+}
+
+fn to_csv(rows: impl IntoIterator<Item = Vec<String>>) -> String {
+    let mut w = csv::Writer::from_writer(Vec::new());
+    for r in rows {
+        w.write_record(&r).expect("write to Vec");
+    }
+    String::from_utf8(w.into_inner().expect("flush Vec")).expect("utf8")
+}
+
+/// Aggregated results: one row for the whole test, one per step.
+pub fn summary_csv(m: &Metrics, runtime: Duration) -> String {
+    let secs = runtime.as_secs_f64().max(0.001);
+    let row = |name: &str, requests: u64, failures: u64, h: &Histogram, statuses: String| {
+        let rate = if requests == 0 {
+            0.0
+        } else {
+            failures as f64 / requests as f64
+        };
+        vec![
+            name.to_string(),
+            requests.to_string(),
+            failures.to_string(),
+            format!("{:.4}", rate),
+            format!("{:.2}", requests as f64 / secs),
+            ms(h.mean()),
+            ms(h.percentile(0.50)),
+            ms(h.percentile(0.95)),
+            ms(h.percentile(0.99)),
+            statuses,
+        ]
+    };
+    let header = [
+        "step",
+        "requests",
+        "failures",
+        "error_rate",
+        "rps",
+        "mean_ms",
+        "p50_ms",
+        "p95_ms",
+        "p99_ms",
+        "status_counts",
+    ];
+    let statuses = m
+        .status_counts
+        .iter()
+        .map(|(k, v)| format!("{k}:{v}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let kinds = m
+        .by_kind
+        .iter()
+        .map(|(k, v)| format!("{}:{v}", k.as_str()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut rows = vec![
+        header.map(String::from).to_vec(),
+        row(
+            "(total)",
+            m.requests,
+            m.failures,
+            &m.latency,
+            format!("{statuses} {kinds}").trim().to_string(),
+        ),
+    ];
+    rows.extend(
+        m.per_step
+            .iter()
+            .map(|(name, s)| row(name, s.requests, s.failures, &s.latency, String::new())),
+    );
+    to_csv(rows)
+}
+
+/// Kept request records. Contains no messages, headers, bodies or query strings.
+pub fn records_csv(m: &Metrics) -> String {
+    let header = [
+        "at_ms",
+        "vu",
+        "step",
+        "method",
+        "path",
+        "status",
+        "duration_ms",
+        "error",
+    ];
+    let rows = m.records.iter().map(|r| {
+        vec![
+            r.at.as_millis().to_string(),
+            r.vu.to_string(),
+            r.step.clone(),
+            r.method.as_str().to_string(),
+            r.path.clone(),
+            r.status.map(|s| s.to_string()).unwrap_or_default(),
+            ms(r.duration),
+            r.error.map(|e| e.as_str().to_string()).unwrap_or_default(),
+        ]
+    });
+    to_csv(std::iter::once(header.map(String::from).to_vec()).chain(rows))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,6 +370,28 @@ mod tests {
         m.tick(5); // idle seconds still produce points
         assert_eq!(m.series.len(), 5);
         assert_eq!(m.current_rps(), 0);
+    }
+
+    #[test]
+    fn csv_escapes_and_omits_messages() {
+        let mut m = Metrics::new(true);
+        let mut r = rec(0, 10, Some(ErrorKind::Other));
+        r.step = "a,\"b\"\nc".into();
+        r.message = "secret-token".into();
+        m.add(r);
+        m.add(rec(5, 20, None));
+        let s = summary_csv(&m, Duration::from_secs(2));
+        assert!(s.starts_with("step,requests,failures,"));
+        assert!(s.contains("\"a,\"\"b\"\"\nc\""), "{s}");
+        assert!(s.contains("(total),2,1,0.5000,1.00,"), "{s}");
+        assert!(s.contains("200:1 500:1 other:1"), "{s}");
+        let d = records_csv(&m);
+        assert_eq!(d.lines().count(), 1 + 3); // header + 2 records, one spanning 2 lines
+        assert!(!d.contains("secret-token") && !s.contains("secret-token"));
+        let mut rdr = csv::Reader::from_reader(d.as_bytes());
+        let first = rdr.records().next().unwrap().unwrap();
+        assert_eq!(&first[2], "a,\"b\"\nc");
+        assert_eq!(&first[7], "other");
     }
 
     #[test]

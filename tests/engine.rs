@@ -161,6 +161,13 @@ async fn per_user_accounts_log_in_separately() {
     let m = h.shared.metrics.lock().unwrap();
     assert!(m.requests > 3);
     assert_eq!(m.failures, 0, "{:?}", m.errors);
+    assert!(
+        m.records
+            .iter()
+            .all(|r| ["/login", "/cookie/{{username}}:{{password}}"].contains(&r.path.as_str()))
+    );
+    let csv = powerwizz::metrics::records_csv(&m);
+    assert!(!csv.contains("pw0") && !csv.contains("user0"), "{csv}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
