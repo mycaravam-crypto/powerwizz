@@ -394,7 +394,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.label("CSV-Export");
             ui.add(egui::TextEdit::singleline(&mut self.export_path).desired_width(200.0))
-                .on_hover_text("Basisname: <name>-zusammenfassung.csv und <name>-requests.csv");
+                .on_hover_text("Basisname: <name>-zusammenfassung.csv, <name>-requests.csv, <name>-bericht.json");
             let finished = sh.status() == Status::Finished;
             if ui
                 .add_enabled(finished, egui::Button::new("Zusammenfassung"))
@@ -419,6 +419,16 @@ impl App {
                 self.message = Some(write_file(
                     &format!("{}-requests.csv", self.export_path),
                     &csv,
+                ));
+            }
+            if ui
+                .add_enabled(finished, egui::Button::new("JSON-Bericht"))
+                .on_hover_text("powerwizz.report/v1, z. B. für docwizz")
+                .clicked()
+            {
+                self.message = Some(write_file(
+                    &format!("{}-bericht.json", self.export_path),
+                    &sh.report_json(),
                 ));
             }
             if let Some((is_err, text)) = &self.message {

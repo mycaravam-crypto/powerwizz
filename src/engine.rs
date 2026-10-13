@@ -1,13 +1,19 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use reqwest::Url;
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
-use crate::metrics::Metrics;
-use crate::model::{Account, AuthStrategy, Method, OnError, Step, TestDefinition, resolve_url};
+use std::collections::BTreeMap;
+
+use serde_json::json;
+
+use crate::metrics::{Histogram, Metrics};
+use crate::model::{
+    Account, AuthStrategy, Method, OnError, Step, TestDefinition, is_local_host, resolve_url,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ErrorKind {
@@ -182,7 +188,9 @@ pub enum Status {
 
 /// State shared between the engine tasks and the GUI.
 pub struct Shared {
+    pub def: Arc<TestDefinition>,
     pub start: Instant,
+    pub started_at: SystemTime,
     pub duration: Duration,
     pub users: u32,
     pub started: AtomicU32,
@@ -214,6 +222,74 @@ impl Shared {
         self.ended.get().copied().unwrap_or_else(|| self.elapsed())
     }
 
+    /// Results as `powerwizz.report/v1` JSON for docwizz. Contains no credentials,
+    /// headers, bodies, cookies, error messages or query strings.
+    pub fn report_json(&self) -> String {
+        let d = &self.def;
+        let m = self.metrics.lock().unwrap();
+        let runtime = self.runtime().as_secs_f64();
+        let ms = |d: Duration| (d.as_secs_f64() * 1e6).round() / 1e3;
+        let latency = |h: &Histogram| {
+            json!({
+                "mean": ms(h.mean()),
+                "p50": ms(h.percentile(0.50)),
+                "p95": ms(h.percentile(0.95)),
+                "p99": ms(h.percentile(0.99)),
+            })
+        };
+        let rate = |f: u64, n: u64| if n == 0 { 0.0 } else { f as f64 / n as f64 };
+        let mut target = Url::parse(&d.base_url).expect("validated");
+        let _ = target.set_username("");
+        let _ = target.set_password(None);
+        target.set_query(None);
+        target.set_fragment(None);
+        let report = json!({
+            "schema": "powerwizz.report/v1",
+            "generator": format!("powerwizz {}", env!("CARGO_PKG_VERSION")),
+            "started_at": iso_utc(self.started_at),
+            "runtime_s": (runtime * 10.0).round() / 10.0,
+            "target": { "base_url": target.as_str(), "local": is_local_host(&d.base_url) },
+            "config": {
+                "users": d.users,
+                "ramp_up_s": d.ramp_up_secs,
+                "duration_s": d.duration_secs,
+                "request_limit": d.request_limit,
+                "timeout_s": d.timeout_secs,
+                "auth": format!("{:?}", d.auth),
+                "scenarios": d.scenarios.iter().map(|s| &s.name).collect::<Vec<_>>(),
+            },
+            "totals": {
+                "users_started": self.started.load(Ordering::Relaxed),
+                "iterations": self.iterations.load(Ordering::Relaxed),
+                "requests": m.requests,
+                "failures": m.failures,
+                "error_rate": rate(m.failures, m.requests),
+                "rps": m.requests as f64 / runtime.max(0.001),
+                "latency_ms": latency(&m.latency),
+                "status_counts": m.status_counts.iter().map(|(k, v)| (k.to_string(), *v)).collect::<BTreeMap<_, _>>(),
+                "error_kinds": m.by_kind.iter().map(|(k, v)| (k.as_str(), *v)).collect::<BTreeMap<_, _>>(),
+            },
+            "steps": m.per_step.iter().map(|(name, s)| json!({
+                "name": name,
+                "method": s.method,
+                "path": s.path,
+                "requests": s.requests,
+                "failures": s.failures,
+                "error_rate": rate(s.failures, s.requests),
+                "latency_ms": latency(&s.latency),
+            })).collect::<Vec<_>>(),
+            "series": m.series.iter().map(|p| json!({
+                "t": p.t,
+                "requests": p.requests,
+                "failures": p.failures,
+                "p50_ms": ms(p.p50),
+                "p95_ms": ms(p.p95),
+                "p99_ms": ms(p.p99),
+            })).collect::<Vec<_>>(),
+        });
+        serde_json::to_string_pretty(&report).expect("serializable")
+    }
+
     fn limit_reached(&self) -> bool {
         self.request_limit
             .is_some_and(|l| self.issued.load(Ordering::Relaxed) >= l)
@@ -239,6 +315,27 @@ impl Handle {
     pub async fn wait(&mut self) {
         let _ = (&mut self.task).await;
     }
+}
+
+/// `YYYY-MM-DDTHH:MM:SSZ` without a date crate (civil-from-days, Howard Hinnant).
+fn iso_utc(t: SystemTime) -> String {
+    let secs = t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64;
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
 }
 
 /// When virtual user `i` of `n` starts: spread evenly over the ramp-up.
@@ -268,8 +365,11 @@ pub fn start(
     }
     let base = Url::parse(&def.base_url).expect("validated");
     let (stop, _) = watch::channel(false);
+    let def = Arc::new(def);
     let shared = Arc::new(Shared {
+        def: def.clone(),
         start: Instant::now(),
+        started_at: SystemTime::now(),
         duration: Duration::from_secs(def.duration_secs),
         users: def.users,
         started: AtomicU32::new(0),
@@ -284,14 +384,7 @@ pub fn start(
     });
     let (tx, rx) = mpsc::channel(CHANNEL_CAP);
     let aggregator = tokio::spawn(aggregate(shared.clone(), rx));
-    let task = tokio::spawn(control(
-        shared.clone(),
-        Arc::new(def),
-        base,
-        accounts,
-        tx,
-        aggregator,
-    ));
+    let task = tokio::spawn(control(shared.clone(), def, base, accounts, tx, aggregator));
     Ok(Handle { shared, task })
 }
 
@@ -497,6 +590,14 @@ mod tests {
         assert_eq!(start_offset(1, 5, r), Duration::from_secs(2));
         assert_eq!(start_offset(4, 5, r), Duration::from_secs(8));
         assert_eq!(start_offset(3, 5, Duration::ZERO), Duration::ZERO);
+    }
+
+    #[test]
+    fn formats_utc_timestamps() {
+        let at = |s| UNIX_EPOCH + Duration::from_secs(s);
+        assert_eq!(iso_utc(at(0)), "1970-01-01T00:00:00Z");
+        assert_eq!(iso_utc(at(951_782_400)), "2000-02-29T00:00:00Z");
+        assert_eq!(iso_utc(at(1_791_913_565)), "2026-10-13T17:46:05Z");
     }
 
     #[test]

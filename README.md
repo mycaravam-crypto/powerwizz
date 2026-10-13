@@ -24,9 +24,39 @@ CI (GitHub Actions, `windows-latest`) runs `cargo fmt --check`, `cargo clippy --
 
 5. After the test, export CSV: `<name>-zusammenfassung.csv` (total + per step: requests, failures, error rate, RPS, mean/p50/p95/p99, status codes and error kinds) and, if request details were enabled, `<name>-requests.csv` (max. 100 000 rows).
 
+6. Or save a JSON report `<name>-bericht.json` (`powerwizz.report/v1`, see below), e.g. for docwizz.
+
 Test definitions are saved as JSON without passwords. Credentials stay in memory only. Exports never contain passwords, cookies, headers, bodies, error messages or query strings; paths come from the step template (`/user/{{username}}`), not the filled-in URL.
 
 Percentiles come from a fixed log histogram (100 µs–60 s); they are accurate to about ±2.5 %.
+
+## JSON report (`powerwizz.report/v1`)
+
+A versioned, machine-readable result file, in the same spirit as `gitwizz.history/v2`. Same privacy rules as the CSV exports: no usernames, passwords, cookies, headers, bodies, error messages or query strings; the target URL is stripped of userinfo and query. Latencies are in milliseconds (histogram, ±2.5 %).
+
+```json
+{
+  "schema": "powerwizz.report/v1",
+  "generator": "powerwizz 0.1.0",
+  "started_at": "2026-10-13T17:46:05Z",
+  "runtime_s": 60.0,
+  "target": { "base_url": "http://localhost:8080/", "local": true },
+  "config": { "users": 10, "ramp_up_s": 10, "duration_s": 60, "request_limit": null,
+              "timeout_s": 30, "auth": "None", "scenarios": ["browse"] },
+  "totals": { "users_started": 10, "iterations": 5400, "requests": 5400, "failures": 3,
+              "error_rate": 0.00056, "rps": 90.0,
+              "latency_ms": { "mean": 92.4, "p50": 90.3, "p95": 109.8, "p99": 390.5 },
+              "status_counts": { "200": 5397, "500": 3 }, "error_kinds": { "status": 3 } },
+  "steps": [ { "name": "browse/list", "method": "GET", "path": "/api/materials",
+               "requests": 5400, "failures": 3, "error_rate": 0.00056,
+               "latency_ms": { "mean": 92.4, "p50": 90.3, "p95": 109.8, "p99": 390.5 } } ],
+  "series": [ { "t": 1, "requests": 7, "failures": 0, "p50_ms": 61.2, "p95_ms": 410.0, "p99_ms": 410.0 } ]
+}
+```
+
+- `steps[].method` + `steps[].path` identify the endpoint. `path` is the step's template, so placeholders stay literal (`/users/{{vu_id}}`), and relative paths are resolved against the base URL.
+- `series` has one point per second (window end `t`), at most 3700.
+- Fields may be added in v1; renames or removals bump the schema version.
 
 ## Tests
 
