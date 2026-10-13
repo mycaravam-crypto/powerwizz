@@ -234,6 +234,36 @@ impl TestDefinition {
     }
 }
 
+/// Reads `username,password` rows (with header) from CSV text.
+pub fn parse_accounts(text: &str) -> Result<Vec<Account>, String> {
+    let mut rdr = csv::Reader::from_reader(text.as_bytes());
+    let headers = rdr.headers().map_err(|e| e.to_string())?.clone();
+    let col = |name: &str| {
+        headers
+            .iter()
+            .position(|h| h.trim().eq_ignore_ascii_case(name))
+            .ok_or(format!("missing column '{name}'"))
+    };
+    let (u, p) = (col("username")?, col("password")?);
+    let mut accounts = Vec::new();
+    for (i, row) in rdr.records().enumerate() {
+        // Never echo row contents: they contain passwords.
+        let row = row.map_err(|_| format!("row {}: malformed", i + 2))?;
+        let username = row.get(u).unwrap_or("").to_string();
+        if username.is_empty() {
+            return Err(format!("row {}: empty username", i + 2));
+        }
+        let password = row.get(p).unwrap_or("").to_string();
+        accounts.push(Account { username, password });
+    }
+    Ok(accounts)
+}
+
+pub fn load_accounts(path: &str) -> Result<Vec<Account>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    parse_accounts(&text)
+}
+
 /// Resolves a step URL against the base URL. Placeholders are substituted before this.
 pub fn resolve_url(base: &Url, url: &str) -> Result<Url, String> {
     let u = if url.starts_with("http://") || url.starts_with("https://") {
@@ -354,6 +384,29 @@ mod tests {
             resolve_url(&base, "https://o/z").unwrap().as_str(),
             "https://o/z"
         );
+    }
+
+    #[test]
+    fn parses_accounts_csv() {
+        let a = parse_accounts("username,password\nalice,\"pa,ss\"\"word\"\nbob,\n").unwrap();
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[0].password, "pa,ss\"word");
+        assert_eq!(a[1].password, "");
+        let swapped = parse_accounts("Password,Username\nx,y\n").unwrap();
+        assert_eq!(swapped[0].username, "y");
+    }
+
+    #[test]
+    fn account_errors_do_not_leak_passwords() {
+        assert!(
+            parse_accounts("user,pw\na,b\n")
+                .unwrap_err()
+                .contains("username")
+        );
+        let e = parse_accounts("username,password\n,topsecret\n").unwrap_err();
+        assert!(e.contains("row 2") && !e.contains("topsecret"));
+        let e = parse_accounts("username,password\na,topsecret,extra\n").unwrap_err();
+        assert!(!e.contains("topsecret"), "{e}");
     }
 
     #[test]

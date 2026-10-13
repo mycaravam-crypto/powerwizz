@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use powerwizz::engine::{ErrorKind, Status, start};
-use powerwizz::model::{Scenario, Step, TestDefinition};
+use powerwizz::model::{Account, AuthStrategy, Method, Scenario, Step, TestDefinition};
 
 fn def(srv: &common::TestServer, url: &str) -> TestDefinition {
     TestDefinition {
@@ -124,4 +124,62 @@ async fn rejects_invalid_definition() {
     let mut d = def(&srv, "/");
     d.users = 0;
     assert!(start(d, vec![], false).is_err());
+}
+
+fn login_def(srv: &common::TestServer) -> TestDefinition {
+    let mut d = def(srv, "/cookie/{{username}}:{{password}}");
+    d.users = 3;
+    d.duration_secs = 1;
+    d.login_steps = vec![Step {
+        name: "login".into(),
+        method: Method::Post,
+        url: "/login".into(),
+        body: "{{username}}:{{password}}".into(),
+        ..Default::default()
+    }];
+    d
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn per_user_accounts_log_in_separately() {
+    let srv = common::start().await;
+    let mut d = login_def(&srv);
+    d.auth = AuthStrategy::PerUser;
+    let accounts: Vec<Account> = (0..3)
+        .map(|i| Account {
+            username: format!("user{i}"),
+            password: format!("pw{i}"),
+        })
+        .collect();
+    assert!(start(d.clone(), accounts[..2].to_vec(), false).is_err());
+
+    let mut h = start(d, accounts, true).unwrap();
+    h.wait().await;
+    let mut bodies = srv.bodies.lock().unwrap().clone();
+    bodies.sort();
+    assert_eq!(bodies, ["user0:pw0", "user1:pw1", "user2:pw2"]);
+    let m = h.shared.metrics.lock().unwrap();
+    assert!(m.requests > 3);
+    assert_eq!(m.failures, 0, "{:?}", m.errors);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shared_account_and_failed_login() {
+    let srv = common::start().await;
+    let mut d = login_def(&srv);
+    d.auth = AuthStrategy::Shared;
+    d.shared_username = "team".into();
+    d.shared_password = "secret".into();
+    let mut h = start(d.clone(), vec![], false).unwrap();
+    h.wait().await;
+    assert_eq!(srv.bodies.lock().unwrap().len(), 3);
+    assert_eq!(h.shared.metrics.lock().unwrap().failures, 0);
+
+    // An empty login body is rejected: each user records one failure and stops.
+    d.login_steps[0].body.clear();
+    let mut h = start(d, vec![], false).unwrap();
+    h.wait().await;
+    let m = h.shared.metrics.lock().unwrap();
+    assert_eq!((m.requests, m.failures), (3, 3));
+    assert!(m.errors.iter().all(|e| !e.message.contains("secret")));
 }
