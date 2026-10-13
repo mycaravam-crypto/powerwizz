@@ -1,6 +1,6 @@
 # powerwizz
 
-Small native Windows tool for load testing web applications with virtual users. See [PLAN.md](PLAN.md) and the [v1 milestone](https://github.com/mycaravam-crypto/powerwizz/milestone/1).
+Small native Windows tool for load testing web applications with virtual users. Dense dark dashboard in the style of reswizz (same palette, boxed sections, segmented meters, self-drawn graphs). See [PLAN.md](PLAN.md) and the [v1 milestone](https://github.com/mycaravam-crypto/powerwizz/milestone/1).
 
 > **Only run load tests against systems you are authorized to test.**
 
