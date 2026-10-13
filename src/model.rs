@@ -264,6 +264,25 @@ pub fn load_accounts(path: &str) -> Result<Vec<Account>, String> {
     parse_accounts(&text)
 }
 
+/// True for localhost, loopback and private-network addresses. This is only a hint
+/// for the start confirmation; it cannot tell whether a host is a production system.
+pub fn is_local_host(url: &str) -> bool {
+    use std::net::IpAddr;
+    let Some(host) = Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned))
+    else {
+        return false;
+    };
+    match host.trim_matches(['[', ']']).parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        Ok(IpAddr::V6(ip)) => {
+            ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local()
+        }
+        Err(_) => host == "localhost" || host.ends_with(".localhost"),
+    }
+}
+
 /// Resolves a step URL against the base URL. Placeholders are substituted before this.
 pub fn resolve_url(base: &Url, url: &str) -> Result<Url, String> {
     let u = if url.starts_with("http://") || url.starts_with("https://") {
@@ -407,6 +426,29 @@ mod tests {
         assert!(e.contains("row 2") && !e.contains("topsecret"));
         let e = parse_accounts("username,password\na,topsecret,extra\n").unwrap_err();
         assert!(!e.contains("topsecret"), "{e}");
+    }
+
+    #[test]
+    fn classifies_local_hosts() {
+        for u in [
+            "http://localhost:8080",
+            "http://127.0.0.1",
+            "http://10.1.2.3",
+            "http://192.168.0.5",
+            "http://172.20.0.1",
+            "http://[::1]/",
+            "http://app.localhost",
+        ] {
+            assert!(is_local_host(u), "{u}");
+        }
+        for u in [
+            "https://example.com",
+            "http://8.8.8.8",
+            "http://172.32.0.1",
+            "not a url",
+        ] {
+            assert!(!is_local_host(u), "{u}");
+        }
     }
 
     #[test]
