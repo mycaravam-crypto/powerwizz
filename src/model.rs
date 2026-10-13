@@ -1,7 +1,7 @@
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 
-// ponytail: conservative caps until measurements (issue #10) justify more.
+// ponytail: conservative caps; 500 VUs measured fine (README), raise only on concrete need.
 pub const MAX_USERS: u32 = 500;
 pub const MAX_DURATION_SECS: u64 = 3600;
 
