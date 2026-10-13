@@ -162,7 +162,7 @@ Mindestens anzeigen:
 - Timeouts und Transportfehler getrennt,
 - Laufzeit und Restdauer.
 
-Latenzen werden aus der gemessenen Request-Dauer (bis Body vollständig gelesen) erfasst. Perzentile kommen aus einem **festen logarithmischen Histogramm** (z. B. Buckets mit ~5 % Breite von 1 ms bis 60 s, < 300 Buckets): konstanter Speicher, dokumentierter relativer Fehler ≤ ~5 %. Ein Histogramm für den Gesamttest, eines pro 1-s-Zeitfenster für die Diagramme (Zeitreihe begrenzt auf Testdauer bzw. max. 3600 Punkte).
+Latenzen werden aus der gemessenen Request-Dauer (bis Body vollständig gelesen) erfasst. Perzentile kommen aus einem **festen logarithmischen Histogramm** (275 Buckets, je 5 % breiter, 100 µs bis 60 s; Ausgabe als geometrische Bucket-Mitte): konstanter Speicher, relativer Fehler ≤ ~2,5 %, Werte außerhalb des Bereichs werden an die Grenzen geklemmt. Ein Histogramm für den Gesamttest, eines pro Schritt und eines pro 1-s-Zeitfenster für die Diagramme (Zeitreihe max. 3700 Punkte). Requests werden dem Fenster zugeordnet, in dem sie enden.
 
 Fehlerarten: `status` (unerwarteter Code), `timeout`, `connect`, `other`.
 
