@@ -12,7 +12,7 @@ use serde_json::json;
 
 use crate::metrics::{Histogram, Metrics};
 use crate::model::{
-    Account, AuthStrategy, Method, OnError, Step, TestDefinition, is_local_host, resolve_url,
+    self, Account, AuthStrategy, Method, OnError, Step, TestDefinition, is_local_host, resolve_url,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -52,22 +52,59 @@ pub struct RequestRecord {
     pub message: String,
 }
 
-/// Values for the only supported placeholders: {{username}}, {{password}}, {{vu_id}}.
-#[derive(Clone, Debug, Default)]
+/// Placeholder values of one virtual user: {{username}}, {{password}}, {{vu_id}}
+/// and whatever its steps extracted from JSON responses (e.g. a JWT).
+#[derive(Debug, Default)]
 pub struct Vars {
     pub username: String,
     pub password: String,
     pub vu_id: u32,
+    /// Written by steps with `extract`; never leaves this user.
+    pub extracted: Mutex<Vec<(String, String)>>,
 }
 
 pub fn fill(s: &str, v: &Vars) -> String {
     if !s.contains("{{") {
         return s.to_string();
     }
-    s.replace("{{username}}", &v.username)
+    let mut s = s
+        .replace("{{username}}", &v.username)
         .replace("{{password}}", &v.password)
-        .replace("{{vu_id}}", &v.vu_id.to_string())
+        .replace("{{vu_id}}", &v.vu_id.to_string());
+    for (name, value) in v.extracted.lock().unwrap().iter() {
+        s = s.replace(&format!("{{{{{name}}}}}"), value);
+    }
+    s
 }
+
+/// Stores the values `step.extract` points at in `body`. Errors name the
+/// pointer, never a value.
+fn extract(step: &Step, body: &[u8], vars: &Vars) -> Result<(), String> {
+    let json: serde_json::Value =
+        serde_json::from_slice(body).map_err(|_| "extract: response is not JSON".to_string())?;
+    let mut found = Vec::with_capacity(step.extract.len());
+    for (name, pointer) in &step.extract {
+        let value = match json.pointer(pointer) {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(serde_json::Value::Null) | None => {
+                return Err(format!("extract {name}: {pointer} not found"));
+            }
+            Some(other) => other.to_string(),
+        };
+        found.push((name.clone(), value));
+    }
+    let mut ex = vars.extracted.lock().unwrap();
+    for (name, value) in found {
+        match ex.iter_mut().find(|(n, _)| *n == name) {
+            Some(slot) => slot.1 = value,
+            None => ex.push((name, value)),
+        }
+    }
+    Ok(())
+}
+
+/// Bodies read for extraction are capped; tokens are far smaller.
+const MAX_EXTRACT_BODY: usize = 1 << 20;
 
 /// One client per virtual user: own cookie jar, own connection pool.
 pub fn new_client(timeout: Duration) -> reqwest::Client {
@@ -117,27 +154,41 @@ pub async fn run_step(ctx: &StepCtx<'_>, label: &str, step: &Step) -> RequestRec
     let method = reqwest::Method::from_bytes(step.method.as_str().as_bytes()).unwrap();
     let mut req = ctx.client.request(method, url);
     for (k, v) in ctx.default_headers.iter().chain(&step.headers) {
-        req = req.header(k, fill(v, ctx.vars));
+        let v = fill(v, ctx.vars);
+        // Not extracted yet (e.g. `Bearer {{token}}` on the login itself): leave it out.
+        if model::placeholders(&v).next().is_none() {
+            req = req.header(k, v);
+        }
     }
     if !step.body.is_empty() {
         req = req.body(fill(&step.body, ctx.vars));
     }
 
+    let keep_body = !step.extract.is_empty();
     let result = async {
         let mut resp = req.send().await?;
         let status = resp.status().as_u16();
-        // Drain the body so latency covers the full response without buffering it.
-        while resp.chunk().await?.is_some() {}
-        Ok::<u16, reqwest::Error>(status)
+        // Read the body so latency covers the full response; only steps that
+        // extract values keep it (capped), the rest is discarded chunk by chunk.
+        let mut body = Vec::new();
+        while let Some(chunk) = resp.chunk().await? {
+            if keep_body && body.len() < MAX_EXTRACT_BODY {
+                body.extend_from_slice(&chunk);
+            }
+        }
+        Ok::<(u16, Vec<u8>), reqwest::Error>((status, body))
     }
     .await;
     rec.duration = begin.elapsed();
     match result {
-        Ok(status) => {
+        Ok((status, body)) => {
             rec.status = Some(status);
             if !step.status_ok(status) {
                 rec.error = Some(ErrorKind::Status);
                 rec.message = format!("unexpected status {status}");
+            } else if keep_body && let Err(e) = extract(step, &body, ctx.vars) {
+                rec.error = Some(ErrorKind::Other);
+                rec.message = e;
             }
         }
         Err(e) => {
@@ -424,6 +475,7 @@ async fn control(
                 username: def.shared_username.clone(),
                 password: def.shared_password.clone(),
                 vu_id: i,
+                ..Default::default()
             },
             AuthStrategy::PerUser => {
                 let a = accounts.next().expect("validated");
@@ -431,6 +483,7 @@ async fn control(
                     username: a.username,
                     password: a.password,
                     vu_id: i,
+                    ..Default::default()
                 }
             }
         };
@@ -484,27 +537,51 @@ async fn virtual_user(
     shared.active.fetch_sub(1, Ordering::Relaxed);
 }
 
+/// Runs the login steps; false if one failed or the request limit was reached.
+async fn login(
+    shared: &Shared,
+    def: &TestDefinition,
+    ctx: &StepCtx<'_>,
+    tx: &mpsc::Sender<RequestRecord>,
+) -> bool {
+    for step in &def.login_steps {
+        if exec(shared, ctx, "login", step, tx).await != Some(Outcome::Ok) {
+            return false;
+        }
+    }
+    true
+}
+
 async fn user_loop(
     shared: &Shared,
     def: &TestDefinition,
     ctx: &StepCtx<'_>,
     tx: &mpsc::Sender<RequestRecord>,
 ) {
-    for step in &def.login_steps {
-        match exec(shared, ctx, "login", step, tx).await {
-            Some(true) => {}
-            _ => return, // login failed or limit reached: this user ends
-        }
+    if !login(shared, def, ctx, tx).await {
+        return; // login failed or limit reached: this user ends
     }
+    // Set after a re-login until a step succeeds, so a 401 that a fresh login
+    // doesn't fix can't turn into a login storm.
+    let mut relogged = false;
     loop {
         let sc = &def.scenarios[fastrand::usize(..def.scenarios.len())];
         let mut completed = true;
         for step in &sc.steps {
             match exec(shared, ctx, &sc.name, step, tx).await {
                 None => return,
-                Some(true) => {}
-                Some(false) if def.on_error == OnError::StopUser => return,
-                Some(false) => {
+                Some(Outcome::Ok) => relogged = false,
+                // Session or token expired: log in again, continue with the next iteration.
+                Some(Outcome::Unauthorized) if !def.login_steps.is_empty() && !relogged => {
+                    if !login(shared, def, ctx, tx).await {
+                        return;
+                    }
+                    relogged = true;
+                    completed = false;
+                    break;
+                }
+                Some(_) if def.on_error == OnError::StopUser => return,
+                Some(_) => {
                     completed = false;
                     break;
                 }
@@ -516,15 +593,22 @@ async fn user_loop(
     }
 }
 
-/// Runs one step and its pause. `None` when the request limit is reached,
-/// otherwise whether the step succeeded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Outcome {
+    Ok,
+    /// 401 although 401 was not expected.
+    Unauthorized,
+    Failed,
+}
+
+/// Runs one step and its pause. `None` when the request limit is reached.
 async fn exec(
     shared: &Shared,
     ctx: &StepCtx<'_>,
     scenario: &str,
     step: &Step,
     tx: &mpsc::Sender<RequestRecord>,
-) -> Option<bool> {
+) -> Option<Outcome> {
     // In-flight requests of other users still complete, so exactly `limit` are recorded.
     if let Some(limit) = shared.request_limit
         && shared.issued.fetch_add(1, Ordering::Relaxed) >= limit
@@ -532,7 +616,11 @@ async fn exec(
         return None;
     }
     let rec = run_step(ctx, &format!("{scenario}/{}", step.name), step).await;
-    let ok = rec.error.is_none();
+    let outcome = match (rec.error, rec.status) {
+        (None, _) => Outcome::Ok,
+        (Some(ErrorKind::Status), Some(401)) => Outcome::Unauthorized,
+        _ => Outcome::Failed,
+    };
     if tx.send(rec).await.is_err() {
         return None;
     }
@@ -540,7 +628,7 @@ async fn exec(
         let ms = fastrand::u64(step.pause_min_ms..=step.pause_max_ms);
         tokio::time::sleep(Duration::from_millis(ms)).await;
     }
-    Some(ok)
+    Some(outcome)
 }
 
 async fn aggregate(shared: Arc<Shared>, mut rx: mpsc::Receiver<RequestRecord>) {
@@ -575,6 +663,7 @@ mod tests {
             username: "bob".into(),
             password: "pw".into(),
             vu_id: 7,
+            extracted: Mutex::new(vec![("token".into(), "abc".into())]),
         };
         assert_eq!(
             fill("u={{username}}&p={{password}}&id={{vu_id}}&x={{other}}", &v),
@@ -598,6 +687,44 @@ mod tests {
         assert_eq!(iso_utc(at(0)), "1970-01-01T00:00:00Z");
         assert_eq!(iso_utc(at(951_782_400)), "2000-02-29T00:00:00Z");
         assert_eq!(iso_utc(at(1_791_913_565)), "2026-10-13T17:46:05Z");
+    }
+
+    #[test]
+    fn fills_extracted_values() {
+        let v = Vars {
+            extracted: Mutex::new(vec![("token".into(), "abc".into())]),
+            ..Default::default()
+        };
+        assert_eq!(fill("Bearer {{token}}", &v), "Bearer abc");
+    }
+
+    #[test]
+    fn extracts_strings_numbers_and_reports_missing() {
+        let step = Step {
+            extract: vec![
+                ("token".into(), "/auth/token".into()),
+                ("id".into(), "/id".into()),
+            ],
+            ..Default::default()
+        };
+        let v = Vars::default();
+        extract(&step, br#"{"auth":{"token":"t1"},"id":42}"#, &v).unwrap();
+        assert_eq!(fill("{{token}}/{{id}}", &v), "t1/42");
+        // A later extraction overwrites, e.g. after a re-login.
+        extract(&step, br#"{"auth":{"token":"t2"},"id":42}"#, &v).unwrap();
+        assert_eq!(fill("{{token}}", &v), "t2");
+        let e = extract(&step, br#"{"auth":{},"id":"secret-id"}"#, &v).unwrap_err();
+        assert_eq!(e, "extract token: /auth/token not found");
+        assert!(
+            extract(&step, b"<html>", &v)
+                .unwrap_err()
+                .contains("not JSON")
+        );
+        assert_eq!(
+            fill("{{token}}", &v),
+            "t2",
+            "failed extraction keeps old values"
+        );
     }
 
     #[test]

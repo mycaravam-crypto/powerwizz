@@ -6,6 +6,7 @@
 //! |---|---|
 //! | `GET /health` | 200, no session needed |
 //! | `POST /api/login` | JSON `{"username","password"}` → 200 + `sid` cookie, 401 on bad credentials |
+//! | `POST /api/token` | JSON `{"username","password"}` → 200 `{"access_token","token_type","expires_in"}` (JWT-shaped bearer token, expires after `token_ttl_s`), 401 on bad credentials |
 //! | `POST /api/logout` | 204, ends the session |
 //! | `GET /api/items` | first 20 items |
 //! | `GET /api/items/{id}` | one item, 404 for id ≥ 1000 |
@@ -14,8 +15,9 @@
 //! | `GET /login` | HTML form with a CSRF token (cookie + hidden field) |
 //! | `POST /login` | form login; 403 without the matching CSRF token, else 303 + `sid` |
 //!
-//! `/api/*` except login needs a session (401), is rate-limited per session (429)
-//! and answers after `latency_ms`.
+//! `/api/*` except login/token needs a session cookie or `Authorization: Bearer <token>`
+//! (401, also for expired tokens), is rate-limited per session (429) and answers after
+//! `latency_ms`.
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
@@ -39,6 +41,8 @@ pub struct Config {
     pub error_rate: f64,
     /// Requests per session and second; 0 = unlimited.
     pub rate_limit: u32,
+    /// Lifetime of bearer tokens from `/api/token`.
+    pub token_ttl_s: u64,
 }
 
 impl Default for Config {
@@ -48,6 +52,7 @@ impl Default for Config {
             slow_ms: (300, 800),
             error_rate: 0.01,
             rate_limit: 20,
+            token_ttl_s: 300,
         }
     }
 }
@@ -57,11 +62,15 @@ pub struct Stats {
     pub requests: AtomicU64,
     pub logins: AtomicU64,
     pub orders: AtomicU64,
+    /// Every bearer token handed out, so tests can check none leaks.
+    pub tokens: Mutex<Vec<String>>,
 }
 
 struct Session {
     window: u64,
     count: u32,
+    /// Bearer tokens expire; cookie sessions don't.
+    expires: Option<Instant>,
 }
 
 struct State {
@@ -76,6 +85,7 @@ struct Req {
     method: String,
     path: String,
     cookie: String,
+    bearer: Option<String>,
     body: String,
 }
 
@@ -139,7 +149,7 @@ async fn read_request(sock: &mut BufReader<tokio::net::TcpStream>) -> Option<Req
     let mut parts = line.split_whitespace();
     let method = parts.next()?.to_string();
     let path = parts.next()?.split('?').next()?.to_string();
-    let (mut len, mut cookie) = (0usize, String::new());
+    let (mut len, mut cookie, mut bearer) = (0usize, String::new(), None);
     loop {
         let mut h = String::new();
         if sock.read_line(&mut h).await.ok()? == 0 {
@@ -153,6 +163,7 @@ async fn read_request(sock: &mut BufReader<tokio::net::TcpStream>) -> Option<Req
         match k.to_ascii_lowercase().as_str() {
             "content-length" => len = v.trim().parse().ok()?,
             "cookie" => cookie = v.trim().to_string(),
+            "authorization" => bearer = v.trim().strip_prefix("Bearer ").map(str::to_owned),
             _ => {}
         }
     }
@@ -162,6 +173,7 @@ async fn read_request(sock: &mut BufReader<tokio::net::TcpStream>) -> Option<Req
         method,
         path,
         cookie,
+        bearer,
         body: String::from_utf8_lossy(&body).into_owned(),
     })
 }
@@ -207,10 +219,27 @@ fn new_session(st: &State) -> String {
         Session {
             window: 0,
             count: 0,
+            expires: None,
         },
     );
     st.stats.logins.fetch_add(1, Ordering::Relaxed);
     sid
+}
+
+fn new_token(st: &State) -> String {
+    // JWT-shaped (header.payload.signature) but opaque: only this server can check it.
+    let tok = format!("eyJhbGciOiJIUzI1NiJ9.{}.{}", token(), token());
+    let expires = Instant::now() + Duration::from_secs(st.cfg.token_ttl_s);
+    st.sessions.lock().unwrap().insert(
+        tok.clone(),
+        Session {
+            window: 0,
+            count: 0,
+            expires: Some(expires),
+        },
+    );
+    st.stats.tokens.lock().unwrap().push(tok.clone());
+    tok
 }
 
 async fn handle(st: &State, req: Req) -> Resp {
@@ -229,6 +258,24 @@ async fn handle(st: &State, req: Req) -> Resp {
             let mut r = resp(200, json!({ "user": u }));
             r.headers = format!("Set-Cookie: sid={}; Path=/; HttpOnly\r\n", new_session(st));
             r
+        }
+        ("POST", ["api", "token"]) => {
+            let v: Value = serde_json::from_str(&req.body).unwrap_or_default();
+            let (u, p) = (
+                v["username"].as_str().unwrap_or(""),
+                v["password"].as_str().unwrap_or(""),
+            );
+            if !valid_login(u, p) {
+                return resp(401, json!({ "error": "invalid credentials" }));
+            }
+            resp(
+                200,
+                json!({
+                    "access_token": new_token(st),
+                    "token_type": "Bearer",
+                    "expires_in": st.cfg.token_ttl_s,
+                }),
+            )
         }
         ("GET", ["login"]) => {
             let t = token();
@@ -271,7 +318,11 @@ async fn handle(st: &State, req: Req) -> Resp {
 }
 
 async fn api(st: &State, req: &Req, segs: &[&str]) -> Resp {
-    let Some(sid) = cookie(&req.cookie, "sid").map(str::to_owned) else {
+    let Some(sid) = req
+        .bearer
+        .clone()
+        .or_else(|| cookie(&req.cookie, "sid").map(str::to_owned))
+    else {
         return resp(401, json!({ "error": "no session" }));
     };
     {
@@ -279,6 +330,10 @@ async fn api(st: &State, req: &Req, segs: &[&str]) -> Resp {
         let Some(s) = sessions.get_mut(&sid) else {
             return resp(401, json!({ "error": "session expired" }));
         };
+        if s.expires.is_some_and(|e| Instant::now() >= e) {
+            sessions.remove(&sid);
+            return resp(401, json!({ "error": "token expired" }));
+        }
         let now = st.start.elapsed().as_secs();
         if s.window != now {
             (s.window, s.count) = (now, 0);
