@@ -78,6 +78,8 @@ async fn stop_ends_test_and_prevents_new_users() {
     assert!(t.elapsed() < Duration::from_secs(1));
     let started = h.shared.started.load(Ordering::Relaxed);
     assert!((1..10).contains(&started), "started {started}");
+    // A request aborted mid-flight may still reach the server just after stop.
+    tokio::time::sleep(Duration::from_millis(100)).await;
     let hits = srv.hits();
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(srv.hits(), hits, "requests after stop");

@@ -205,6 +205,11 @@ impl Shared {
         self.start.elapsed()
     }
 
+    fn limit_reached(&self) -> bool {
+        self.request_limit
+            .is_some_and(|l| self.issued.load(Ordering::Relaxed) >= l)
+    }
+
     fn set_status(&self, s: Status) {
         *self.status.lock().unwrap() = s;
     }
@@ -298,6 +303,9 @@ async fn control(
     let mut users = JoinSet::new();
     let mut accounts = accounts.into_iter();
     for i in 0..def.users {
+        if shared.limit_reached() {
+            break;
+        }
         let at = tokio::time::Instant::from_std(shared.start + start_offset(i, def.users, ramp_up));
         tokio::select! {
             _ = tokio::time::sleep_until(at) => {}
@@ -332,9 +340,12 @@ async fn control(
             tx.clone(),
         ));
     }
+    // Users end on their own when the request limit is reached or login fails.
+    let all_done = async { while users.join_next().await.is_some() {} };
     tokio::select! {
         _ = tokio::time::sleep_until(deadline) => {}
         _ = stopped(&mut stop) => {}
+        _ = all_done => {}
     }
     shared.set_status(Status::Stopping);
     shared.stop.send_replace(true);
@@ -410,10 +421,10 @@ async fn exec(
     step: &Step,
     tx: &mpsc::Sender<RequestRecord>,
 ) -> Option<bool> {
+    // In-flight requests of other users still complete, so exactly `limit` are recorded.
     if let Some(limit) = shared.request_limit
         && shared.issued.fetch_add(1, Ordering::Relaxed) >= limit
     {
-        shared.stop.send_replace(true);
         return None;
     }
     let rec = run_step(ctx, &format!("{scenario}/{}", step.name), step).await;
