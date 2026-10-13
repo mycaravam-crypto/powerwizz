@@ -13,7 +13,13 @@ cargo run              # debug build, opens the GUI
 cargo build --release  # target/release/powerwizz.exe on Windows
 ```
 
-CI (GitHub Actions, `windows-latest`) runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` and a release build. The release EXE is uploaded as the `powerwizz-windows-x64` artifact.
+## CI and releases
+
+- **test**: every pull request and push to `main`. Linux runs `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked` and the versioning-policy test; Windows runs clippy and the tests again and builds the release EXE, so a PR that breaks the shipping build fails before merge.
+- **release**: each merged PR into `main` tags the next SemVer version and publishes a GitHub release with `powerwizz-vX.Y.Z-windows-x64.exe` and `SHA256SUMS.txt`. Git tags are the source of truth. A PR label picks the bump: `release:patch` (the default), `release:minor`, `release:major`, or `release:none` to skip the release. The version shows in the window title and in the JSON report's `generator`.
+- **security**: Trivy scans every crate in `Cargo.lock` for known CVEs on each PR, on `main` and weekly; findings land in the Security tab, a fixable CRITICAL fails the job.
+
+Same setup as reswizz.
 
 ## Usage
 
