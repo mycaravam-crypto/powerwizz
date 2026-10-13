@@ -1,7 +1,10 @@
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use eframe::egui::{self, Color32, RichText};
-use powerwizz::engine::{self, Handle, Status};
+use egui_plot::{Legend, Line, Plot};
+use powerwizz::engine::{self, ErrorKind, Handle, Status};
+use powerwizz::metrics::Point;
 use powerwizz::model::{
     self, Account, AuthStrategy, MAX_DURATION_SECS, MAX_USERS, Method, OnError, Scenario, Step,
     TestDefinition,
@@ -288,8 +291,146 @@ impl App {
             ui.label("Noch kein Test gelaufen.");
             return;
         };
-        let m = h.shared.metrics.lock().unwrap();
-        ui.label(format!("Requests: {}  Fehler: {}", m.requests, m.failures));
+        let sh = &h.shared;
+        let runtime = sh.runtime();
+        let secs = runtime.as_secs_f64().max(0.001);
+        // Copy what we draw so the aggregator is blocked only briefly.
+        let (m, rps, errs, p50, p95, p99, statuses, errors) = {
+            let m = sh.metrics.lock().unwrap();
+            let pts = |f: &dyn Fn(&Point) -> f64| -> Vec<[f64; 2]> {
+                m.series.iter().map(|p| [p.t as f64, f(p)]).collect()
+            };
+            let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+            (
+                Summary {
+                    requests: m.requests,
+                    failures: m.failures,
+                    error_rate: m.error_rate(),
+                    current_rps: m.current_rps(),
+                    mean: m.latency.mean(),
+                    p50: m.latency.percentile(0.50),
+                    p95: m.latency.percentile(0.95),
+                    p99: m.latency.percentile(0.99),
+                    timeouts: m.kind_count(ErrorKind::Timeout),
+                    transport: m.kind_count(ErrorKind::Connect) + m.kind_count(ErrorKind::Other),
+                    dropped: m.dropped_records,
+                },
+                pts(&|p| p.requests as f64),
+                pts(&|p| p.failures as f64),
+                pts(&|p| ms(p.p50)),
+                pts(&|p| ms(p.p95)),
+                pts(&|p| ms(p.p99)),
+                m.status_counts
+                    .iter()
+                    .map(|(k, v)| format!("{k}: {v}"))
+                    .collect::<Vec<_>>(),
+                m.errors.iter().rev().cloned().collect::<Vec<_>>(),
+            )
+        };
+
+        ui.horizontal_wrapped(|ui| {
+            kpi(
+                ui,
+                "Aktive Benutzer",
+                format!(
+                    "{} (gestartet {} / {})",
+                    sh.active.load(Ordering::Relaxed),
+                    sh.started.load(Ordering::Relaxed),
+                    sh.users
+                ),
+            );
+            kpi(
+                ui,
+                "RPS",
+                format!("{} (Ø {:.1})", m.current_rps, m.requests as f64 / secs),
+            );
+            kpi(ui, "p95", fmt_ms(m.p95));
+            kpi(
+                ui,
+                "Fehlerrate",
+                format!("{:.2} % ({})", m.error_rate * 100.0, m.failures),
+            );
+            kpi(ui, "Requests", m.requests.to_string());
+            kpi(
+                ui,
+                "Iterationen",
+                sh.iterations.load(Ordering::Relaxed).to_string(),
+            );
+            kpi(ui, "Timeouts", m.timeouts.to_string());
+            kpi(ui, "Transportfehler", m.transport.to_string());
+            kpi(
+                ui,
+                "Laufzeit / Rest",
+                format!(
+                    "{} / {} s",
+                    runtime.as_secs(),
+                    if sh.status() == Status::Finished {
+                        0
+                    } else {
+                        sh.duration.saturating_sub(runtime).as_secs()
+                    }
+                ),
+            );
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!(
+                "Latenz Ø {}  p50 {}  p95 {}  p99 {}",
+                fmt_ms(m.mean),
+                fmt_ms(m.p50),
+                fmt_ms(m.p95),
+                fmt_ms(m.p99)
+            ));
+            ui.separator();
+            ui.label(format!("Statuscodes: {}", statuses.join("  ")));
+            if m.dropped > 0 {
+                ui.colored_label(WARN, format!("{} Request-Details verworfen", m.dropped));
+            }
+        })
+        .response
+        .on_hover_text("Perzentile aus Histogramm, Genauigkeit ca. ±2,5 %");
+
+        let height = ((ui.available_height() - 200.0) / 2.0).max(120.0);
+        ui.label("Requests und Fehler pro Sekunde");
+        Plot::new("rps")
+            .height(height)
+            .legend(Legend::default())
+            .allow_scroll(false)
+            .show(ui, |p| {
+                p.line(Line::new("RPS", rps).color(Color32::LIGHT_BLUE));
+                p.line(Line::new("Fehler/s", errs).color(ERR));
+            });
+        ui.label("Latenz (ms)");
+        Plot::new("latency")
+            .height(height)
+            .legend(Legend::default())
+            .allow_scroll(false)
+            .show(ui, |p| {
+                p.line(Line::new("p50", p50));
+                p.line(Line::new("p95", p95));
+                p.line(Line::new("p99", p99));
+            });
+
+        ui.label(format!("Fehler (letzte {})", errors.len()));
+        egui::ScrollArea::vertical()
+            .id_salt("errors")
+            .show(ui, |ui| {
+                egui::Grid::new("errors")
+                    .striped(true)
+                    .num_columns(4)
+                    .show(ui, |ui| {
+                        for e in &errors {
+                            ui.label(format!("{:.1} s", e.at.as_secs_f64()));
+                            ui.label(&e.step);
+                            ui.label(match (e.status, e.error) {
+                                (Some(s), _) => s.to_string(),
+                                (None, Some(k)) => k.as_str().to_string(),
+                                _ => String::new(),
+                            });
+                            ui.label(&e.message);
+                            ui.end_row();
+                        }
+                    });
+            });
     }
 
     fn confirm_dialog(&mut self, ctx: &egui::Context) {
@@ -347,6 +488,33 @@ impl App {
             }
         }
     }
+}
+
+struct Summary {
+    requests: u64,
+    failures: u64,
+    error_rate: f64,
+    current_rps: u64,
+    mean: Duration,
+    p50: Duration,
+    p95: Duration,
+    p99: Duration,
+    timeouts: u64,
+    transport: u64,
+    dropped: u64,
+}
+
+fn kpi(ui: &mut egui::Ui, label: &str, value: String) {
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.vertical(|ui| {
+            ui.label(RichText::new(label).small().weak());
+            ui.add(egui::Label::new(RichText::new(value).strong().size(18.0)).extend());
+        });
+    });
+}
+
+fn fmt_ms(d: Duration) -> String {
+    format!("{:.1} ms", d.as_secs_f64() * 1000.0)
 }
 
 fn on_error_text(o: OnError) -> &'static str {
