@@ -1,0 +1,76 @@
+{
+  "base_url": "http://localhost:8080",
+  "users": 50,
+  "ramp_up_secs": 10,
+  "duration_secs": 60,
+  "request_limit": null,
+  "timeout_secs": 10,
+  "on_error": "AbortIteration",
+  "auth": "PerUser",
+  "login_steps": [
+    {
+      "name": "login",
+      "method": "Post",
+      "url": "/api/login",
+      "headers": [
+        [
+          "Content-Type",
+          "application/json"
+        ]
+      ],
+      "body": "{\"username\":\"{{username}}\",\"password\":\"{{password}}\"}",
+      "pause_min_ms": 200,
+      "pause_max_ms": 500
+    }
+  ],
+  "scenarios": [
+    {
+      "name": "browse",
+      "steps": [
+        {
+          "name": "list",
+          "method": "Get",
+          "url": "/api/items",
+          "pause_min_ms": 300,
+          "pause_max_ms": 1000
+        },
+        {
+          "name": "detail",
+          "method": "Get",
+          "url": "/api/items/{{vu_id}}",
+          "pause_min_ms": 300,
+          "pause_max_ms": 1000
+        }
+      ]
+    },
+    {
+      "name": "order",
+      "steps": [
+        {
+          "name": "detail",
+          "method": "Get",
+          "url": "/api/items/{{vu_id}}",
+          "pause_min_ms": 300,
+          "pause_max_ms": 800
+        },
+        {
+          "name": "order",
+          "method": "Post",
+          "url": "/api/orders",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ]
+          ],
+          "body": "{\"item\":{{vu_id}},\"qty\":1}",
+          "expected_status": [
+            201
+          ],
+          "pause_min_ms": 500,
+          "pause_max_ms": 1500
+        }
+      ]
+    }
+  ]
+}
