@@ -143,10 +143,10 @@ Startpunkt sind wenige Dateien; aufteilen erst, wenn eine Datei unübersichtlich
 
 ### Trennung von GUI und Lastgenerator
 
-- Die Engine ist ohne GUI nutzbar (`engine::run(def, accounts, cancel) -> Handle`). Integrationstests treiben die Engine direkt an.
-- VU-Tasks senden Request-Ergebnisse über einen **begrenzten** `tokio::mpsc`-Kanal an einen Aggregator-Task. `// ponytail:` Alternativ atomare Zähler, falls der Kanal messbar zum Engpass wird.
-- Der Aggregator veröffentlicht ca. 5× pro Sekunde einen Snapshot (`tokio::sync::watch`); die GUI liest nur diesen und ruft `ctx.request_repaint_after(200 ms)` auf.
-- Stop: ein `CancellationToken`-artiges Signal (`tokio::sync::watch<bool>` oder `tokio_util`, falls ohnehin vorhanden) verhindert neue VU-Starts und bricht laufende Requests per `select!` ab.
+- Die Engine ist ohne GUI nutzbar (`engine::start(def, accounts, keep_records) -> Result<Handle, Vec<String>>`, `Handle::stop()`, `Handle::wait()`). Integrationstests treiben die Engine direkt an.
+- VU-Tasks senden Request-Ergebnisse über einen **begrenzten** `tokio::mpsc`-Kanal (10 000) an einen Aggregator-Task, der sie gebündelt in `Metrics` einträgt und alle 200 ms das Zeitfenster weiterschaltet.
+- `Metrics` liegt hinter einem `Mutex` in `engine::Shared` (dazu atomare Zähler für gestartete/aktive VUs und Iterationen). Die GUI sperrt nur kurz zum Lesen und ruft `ctx.request_repaint_after(200 ms)` auf. `// ponytail:` Snapshots über `watch`, falls GUI-Lesezugriffe den Aggregator messbar bremsen.
+- Stop: `tokio::sync::watch<bool>` verhindert neue VU-Starts; jeder VU läuft in einem `select!` gegen das Signal, laufende Requests und Pausen werden dadurch abgebrochen und nicht gezählt. Beim Request-Limit stellen VUs neue Requests ein, laufende werden noch gezählt; sind alle VUs beendet (Limit, fehlgeschlagener Login), endet der Test.
 - Request-Timeout (pro Request) und globales Testende (Dauer + kurze Nachlaufzeit) verhindern hängende Tests.
 
 ## 8. Messwerte
