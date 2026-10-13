@@ -104,7 +104,10 @@ async fn classifies_errors_and_sanitizes() {
         .unwrap()
         .port();
     let closed = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+    // Windows retries SYNs to a closed port for ~2 s before refusing.
+    let patient = new_client(Duration::from_secs(10));
     let ctx = StepCtx {
+        client: &patient,
         base: &closed,
         ..ctx
     };
