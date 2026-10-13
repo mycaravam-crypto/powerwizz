@@ -1,5 +1,5 @@
 {
-  "base_url": "http://localhost:8080",
+  "base_url": "http://127.0.0.1:18080",
   "users": 50,
   "ramp_up_secs": 10,
   "duration_secs": 60,

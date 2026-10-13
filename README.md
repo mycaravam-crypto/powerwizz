@@ -36,7 +36,7 @@ Percentiles come from a fixed log histogram (100 µs–60 s); they are accurate 
 `examples/mockapp` is a small in-memory web shop to load-test against: JSON login with session cookie, protected API with route parameters, varying latency, 1 % order errors, a per-session rate limit and a CSRF-protected form.
 
 ```sh
-cargo run --example mockapp            # http://127.0.0.1:8080, or pass another address
+cargo run --example mockapp            # http://127.0.0.1:18080, or pass another address
 ```
 
 Then in powerwizz: load `examples/mockapp/test.json` (session cookie) or `examples/mockapp/test-jwt.json` (bearer token from `/api/token`), choose *Account pro Benutzer* and import `examples/mockapp/accounts.csv` (500 accounts `userN` / `pwN`; the app accepts `user0`…`user999`).

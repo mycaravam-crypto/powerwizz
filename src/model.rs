@@ -147,7 +147,8 @@ pub struct TestDefinition {
 impl Default for TestDefinition {
     fn default() -> Self {
         TestDefinition {
-            base_url: "http://localhost:8080".into(),
+            // The mock app's address; 8080 is often taken by real local servers.
+            base_url: "http://127.0.0.1:18080".into(),
             headers: Vec::new(),
             users: 10,
             ramp_up_secs: 10,
