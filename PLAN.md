@@ -74,7 +74,7 @@ Vor dem Hinzufügen weiterer Crates prüfen, ob eine bestehende Dependency die F
 - Benutzerverwaltung im Zielsystem außerhalb explizit konfigurierter HTTP-Schritte.
 - CAPTCHA-, MFA- oder sonstige Umgehung von Schutzmechanismen.
 - Automatische Erkennung von Navigationspfaden.
-- Extraktion aus HTML oder Response-Headern (z. B. CSRF-Token in einem Formular). Werte aus **JSON**-Antworten (z. B. JWT) werden seit #27 unterstützt, siehe §6.
+- Extraktion aus HTML (z. B. CSRF-Token in einem Formular) und per Regex. Werte aus JSON-Antworten (#27), Response-Headern und Set-Cookie (#29) werden unterstützt, siehe §6.
 - Cloud-Dienste, Accounts, Telemetrie, Lizenzserver, Datenbank.
 - Scripting-Sprache, Plugin-System, Variablen-Engine (Ausnahme: die festen Platzhalter aus §6) oder Workflow-IDE.
 - HTTP/3, WebSockets, Browser-Rendering.
@@ -120,7 +120,7 @@ Authentifizierungsstrategien (eine pro Test):
 
 Login- und optionale Registrierungsschritte sind normale HTTP-Schritte. In URL, Headern und Body werden ersetzt: die festen Platzhalter `{{username}}`, `{{password}}`, `{{vu_id}}` sowie extrahierte Werte. Keine weitere Template-Logik.
 
-**JWT / Token aus JSON-Antworten (#27):** Ein Schritt kann mit `extract` (Zeilen `name = /json/pointer`) Werte aus seiner JSON-Antwort übernehmen; sie gelten pro VU als `{{name}}` (z. B. Standard-Header `Authorization: Bearer {{token}}`). Header mit noch unbelegten Platzhaltern werden nicht gesendet. Unbekannte Platzhalter sind Validierungsfehler. Extrahierte Werte bleiben im Speicher des VU und erscheinen nie in Records, Exporten oder Fehlermeldungen.
+**JWT / Token aus Antworten (#27, #29):** Ein Schritt kann mit `extract` (Zeilen `name = quelle`) Werte aus seiner Antwort übernehmen. Quelle: JSON-Pointer (`/access_token`), `header:Name` (case-insensitiv, führendes `Bearer ` entfernt, erster gleichnamiger Header gilt) oder `cookie:name` (Wert aus `Set-Cookie` ohne Attribute). Die Werte gelten pro VU als `{{name}}` (z. B. Standard-Header `Authorization: Bearer {{token}}`). Header mit noch unbelegten Platzhaltern werden nicht gesendet. Unbekannte Platzhalter sind Validierungsfehler. Extrahierte Werte bleiben im Speicher des VU und erscheinen nie in Records, Exporten oder Fehlermeldungen.
 
 Regeln:
 

@@ -7,6 +7,7 @@
 //! | `GET /health` | 200, no session needed |
 //! | `POST /api/login` | JSON `{"username","password"}` → 200 + `sid` cookie, 401 on bad credentials |
 //! | `POST /api/token` | JSON `{"username","password"}` → 200 `{"access_token","token_type","expires_in"}` (JWT-shaped bearer token, expires after `token_ttl_s`), 401 on bad credentials |
+//! | `POST /api/token?via=header` | same, but 204 with the token only in `Authorization: Bearer …` and `Set-Cookie: jwt=…` |
 //! | `POST /api/logout` | 204, ends the session |
 //! | `GET /api/items` | first 20 items |
 //! | `GET /api/items/{id}` | one item, 404 for id ≥ 1000 |
@@ -84,6 +85,7 @@ struct State {
 struct Req {
     method: String,
     path: String,
+    query: String,
     cookie: String,
     bearer: Option<String>,
     body: String,
@@ -148,7 +150,9 @@ async fn read_request(sock: &mut BufReader<tokio::net::TcpStream>) -> Option<Req
     }
     let mut parts = line.split_whitespace();
     let method = parts.next()?.to_string();
-    let path = parts.next()?.split('?').next()?.to_string();
+    let target = parts.next()?;
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let (path, query) = (path.to_string(), query.to_string());
     let (mut len, mut cookie, mut bearer) = (0usize, String::new(), None);
     loop {
         let mut h = String::new();
@@ -172,6 +176,7 @@ async fn read_request(sock: &mut BufReader<tokio::net::TcpStream>) -> Option<Req
     Some(Req {
         method,
         path,
+        query,
         cookie,
         bearer,
         body: String::from_utf8_lossy(&body).into_owned(),
@@ -268,10 +273,20 @@ async fn handle(st: &State, req: Req) -> Resp {
             if !valid_login(u, p) {
                 return resp(401, json!({ "error": "invalid credentials" }));
             }
+            let tok = new_token(st);
+            if req.query.split('&').any(|kv| kv == "via=header") {
+                // Token only as header and cookie, no JSON body.
+                let mut r = resp(204, json!(null));
+                r.body.clear();
+                r.headers = format!(
+                    "Authorization: Bearer {tok}\r\nSet-Cookie: jwt={tok}; Path=/; HttpOnly\r\n"
+                );
+                return r;
+            }
             resp(
                 200,
                 json!({
-                    "access_token": new_token(st),
+                    "access_token": tok,
                     "token_type": "Bearer",
                     "expires_in": st.cfg.token_ttl_s,
                 }),
