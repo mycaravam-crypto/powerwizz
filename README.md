@@ -108,6 +108,7 @@ which has no console to print to.
 | Option (`run`) | Meaning |
 |---|---|
 | `--base-url <url>` | override the definition's base URL, e.g. per environment |
+| `--label <text>` | what the run measures, e.g. `staging, Release, 10k orders`; into the report as `label` (overrides the definition's *umgebung*) |
 | `--accounts <users.csv>` | `username,password` per virtual user (*Account pro Benutzer*) |
 | `--password-env <VAR>` | the shared account's password, from that environment variable; never an argument, never in the file |
 | `--out <name>` | write `<name>-bericht.json` and `<name>-zusammenfassung.csv`; a missing folder is created before the run |
@@ -157,6 +158,7 @@ From a 60 s run of `test.json` with 50 users against the mock shop, trimmed to o
   "started_at": "2026-10-13T18:39:16Z",
   "runtime_s": 60.0,
   "target": { "base_url": "http://127.0.0.1:18080/", "local": true },
+  "label": "mock shop, local",
   "config": { "users": 50, "ramp_up_s": 10, "duration_s": 60, "request_limit": null,
               "timeout_s": 10, "auth": "PerUser", "scenarios": ["browse", "order"] },
   "totals": { "users_started": 50, "users_logged_in": 50, "iterations": 1808, "requests": 3758, "failures": 8,
@@ -170,6 +172,8 @@ From a 60 s run of `test.json` with 50 users against the mock shop, trimmed to o
 }
 ```
 
+- **Label:** the definition's *umgebung* or `--label`, trimmed, at most 200 characters; `null` when empty. Say where
+  the numbers come from (a dev stack, a Debug build, a small database), so they aren't read as production figures.
 - **Endpoint:** `steps[].method` and `steps[].path`. The path is the step's template, resolved against the base URL,
   so placeholders stay literal.
 - **Series:** one point per second (`t` is the end of the second), at most 3700.

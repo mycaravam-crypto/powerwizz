@@ -252,3 +252,18 @@ async fn a_failed_login_is_not_a_logged_in_user() {
         (Some(3), Some(0))
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_label_says_what_the_run_measured() {
+    let srv = common::start().await;
+    let mut d = def(&srv, "/");
+    d.duration_secs = 1;
+    let report = |d: TestDefinition| async {
+        let mut h = start(d, vec![], false).unwrap();
+        h.wait().await;
+        serde_json::from_str::<serde_json::Value>(&h.shared.report_json()).unwrap()
+    };
+    assert!(report(d.clone()).await["label"].is_null());
+    d.label = "  dev, Debug, testdb ".into();
+    assert_eq!(report(d).await["label"], "dev, Debug, testdb");
+}

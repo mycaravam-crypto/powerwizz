@@ -127,6 +127,9 @@ pub struct Account {
 #[serde(default)]
 pub struct TestDefinition {
     pub base_url: String,
+    /// What the run measures, e.g. "staging, Release, 10k orders": into the report, so numbers from a dev stack can't
+    /// pass for production figures. Free text, never a secret.
+    pub label: String,
     pub headers: Vec<(String, String)>,
     pub users: u32,
     pub ramp_up_secs: u64,
@@ -149,6 +152,7 @@ impl Default for TestDefinition {
         TestDefinition {
             // The mock app's address; 8080 is often taken by real local servers.
             base_url: "http://127.0.0.1:18080".into(),
+            label: String::new(),
             headers: Vec::new(),
             users: 10,
             ramp_up_secs: 10,

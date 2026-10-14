@@ -196,6 +196,13 @@ impl App {
                         egui::TextEdit::singleline(&mut d.base_url).desired_width(f32::INFINITY),
                     );
                     ui.end_row();
+                    key(ui, "umgebung");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut d.label)
+                            .hint_text("z. B. staging, Release")
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.end_row();
                     key(ui, "benutzer");
                     ui.add(egui::DragValue::new(&mut d.users).range(1..=MAX_USERS));
                     ui.end_row();
@@ -591,6 +598,14 @@ impl App {
                 "confirm_grid",
                 &[
                     ("ziel", d.base_url.clone()),
+                    (
+                        "umgebung",
+                        if d.label.trim().is_empty() {
+                            "–".into()
+                        } else {
+                            d.label.clone()
+                        },
+                    ),
                     (
                         "last",
                         format!(

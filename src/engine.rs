@@ -351,6 +351,7 @@ impl Shared {
             "started_at": iso_utc(self.started_at),
             "runtime_s": (runtime * 10.0).round() / 10.0,
             "target": { "base_url": target.as_str(), "local": is_local_host(&d.base_url) },
+            "label": Some(d.label.trim()).filter(|l| !l.is_empty()).map(|l| l.chars().take(200).collect::<String>()),
             "config": {
                 "users": d.users,
                 "ramp_up_s": d.ramp_up_secs,
