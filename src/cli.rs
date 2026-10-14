@@ -23,6 +23,7 @@ usage:
 
 run options:
   --base-url <url>          override the definition's base URL (e.g. per environment)
+  --label <text>            what this run measures, e.g. \"staging, Release\"; into the report (overrides the definition)
   --accounts <users.csv>    username,password per virtual user (auth PerUser)
   --password-env <VAR>      the shared account's password, from this environment variable
   --out <name>              write <name>-bericht.json (powerwizz.report/v1) and <name>-zusammenfassung.csv
@@ -40,6 +41,7 @@ pub struct Args {
     pub command: String,
     pub file: String,
     pub base_url: Option<String>,
+    pub label: Option<String>,
     pub accounts: Option<String>,
     pub password_env: Option<String>,
     pub out: Option<String>,
@@ -103,6 +105,7 @@ pub fn parse(args: &[String]) -> Result<Args, String> {
         let number = |v: String| v.parse::<f64>().ok().filter(|n| n.is_finite() && *n >= 0.0);
         match name {
             "base-url" => a.base_url = Some(value()?),
+            "label" => a.label = Some(value()?),
             "accounts" => a.accounts = Some(value()?),
             "password-env" => a.password_env = Some(value()?),
             "out" => a.out = Some(value()?),
@@ -192,6 +195,9 @@ pub fn main(args: &[String]) -> i32 {
 /// The definition with the CLI's overrides and secrets applied, and the accounts; or why it can't start.
 fn prepare(a: &Args) -> Result<(TestDefinition, Vec<Account>), Vec<String>> {
     let mut def = TestDefinition::load(&a.file).map_err(|e| vec![e])?;
+    if let Some(label) = &a.label {
+        def.label = label.clone();
+    }
     if let Some(url) = &a.base_url {
         def.base_url = url.clone();
     }
@@ -412,8 +418,9 @@ mod tests {
 
     #[test]
     fn parses_run_options() {
-        let a = p("run t.json --base-url=http://x --accounts a.csv --out o --details --format json --max-error-rate 0.01 --max-p95 200 --yes").unwrap();
+        let a = p("run t.json --base-url=http://x --accounts a.csv --out o --details --format json --max-error-rate 0.01 --max-p95 200 --yes --label=dev").unwrap();
         assert_eq!(a.file, "t.json");
+        assert_eq!(a.label.as_deref(), Some("dev"));
         assert_eq!(a.base_url.as_deref(), Some("http://x"));
         assert_eq!((a.details, a.json, a.yes), (true, true, true));
         assert_eq!((a.max_error_rate, a.max_p95_ms), (Some(0.01), Some(200.0)));
