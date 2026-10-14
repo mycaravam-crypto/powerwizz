@@ -5,10 +5,12 @@ reswizz. **Virtual users** run as async tasks, each with its own cookie jar and 
 work through ordered HTTP scenarios with random pauses. A **live dashboard** shows active users, requests per second,
 error rate, p50/p95/p99 latency and the latest errors. Logins can use a shared account or **one account per user** from
 a CSV, with session cookies or **JWTs** taken from the login response. Results export as CSV or as a versioned
-**JSON report** that docwizz can read.
+**JSON report** that docwizz can read. **`powerwizz-cli`** runs the same test definitions headless, for CI and gitwizz
+gates.
 
 > **Only run load tests against systems you are authorized to test.** powerwizz asks for confirmation before every
-> start and warns when the target isn't a local or private host.
+> start and warns when the target isn't a local or private host. `powerwizz-cli` refuses such a target unless you pass
+> `--yes`.
 
 ## Quick start
 
@@ -86,6 +88,54 @@ definitions: `test.json` (session cookie) and `test-jwt.json` (bearer token from
 Every `/api/*` route except login and token answers 401 without a session cookie or valid bearer token, and 429
 above 20 requests per second and session.
 
+## Command line: powerwizz-cli
+
+`powerwizz-cli` is the headless twin of the app, for CI, [gitwizz](https://github.com/mycaravam-crypto/gitwizz) gates
+and [docwizz](https://github.com/mycaravam-crypto/docwizz). It reads the test definitions the app saves, validates them
+with the same rules and runs the same engine. It is a separate console exe because the app is a Windows GUI program,
+which has no console to print to.
+
+    powerwizz-cli run <test.json> [options]      run a test, print the result
+    powerwizz-cli validate <test.json> [--base-url u] [--accounts f] [--password-env VAR]
+    powerwizz-cli --version                      powerwizz X.Y.Z
+    powerwizz-cli help
+
+| Option (`run`) | Meaning |
+|---|---|
+| `--base-url <url>` | override the definition's base URL, e.g. per environment |
+| `--accounts <users.csv>` | `username,password` per virtual user (*Account pro Benutzer*) |
+| `--password-env <VAR>` | the shared account's password, from that environment variable; never an argument, never in the file |
+| `--out <name>` | write `<name>-bericht.json` and `<name>-zusammenfassung.csv`; a missing folder is created before the run |
+| `--details` | also `<name>-requests.csv` (needs `--out`) |
+| `--format text\|json` | stdout: a summary (default) or the `powerwizz.report/v1` report alone |
+| `--max-error-rate <0..1>` | fail when the total error rate is higher |
+| `--max-p95 <ms>` | fail when the total p95 latency is higher; with a threshold, a run without any request fails too |
+| `--yes` | you are authorized; required when the target isn't a local or private host |
+
+Progress (every 5 s), threshold verdicts and written files go to stderr, so stdout stays parseable. Ctrl+C stops the
+run like **■ stop** and still prints and writes the results.
+
+| Exit code | Meaning |
+|---|---|
+| `0` | done, thresholds met (`validate`: the test would start) |
+| `1` | a threshold was missed |
+| `2` | bad arguments, an invalid definition or accounts, a non-local target without `--yes`, an unwritable output |
+
+**In the ecosystem.** A gitwizz gate runs the test and fails the PR on the thresholds; `gitwizz doctor` checks that
+`powerwizz-cli --version` works. docwizz then puts the measured numbers next to each endpoint in `api.md` and its HTML:
+
+```yaml
+# .gitwizz.yml
+gates:
+  - id: load
+    type: command
+    run: powerwizz-cli run load/test.json --accounts load/users.csv --out load/run --max-error-rate 0.01 --max-p95 200
+    blocking: false
+```
+
+    docwizz load import . load/run-bericht.json
+    docwizz generate . --html
+
 ## JSON report for docwizz
 
 `<name>-bericht.json` is a versioned, machine-readable result (`powerwizz.report/v1`), in the same spirit as
@@ -149,6 +199,8 @@ The integration tests need no external server:
 - **End to end** (`tests/mockapp.rs`): the shipped samples against the mock shop. Per-user login, all scenarios clean,
   401 without login, 429 and 500 counted, CSRF form rejected, JWT from JSON, header and cookie, token expiry with
   re-login, and no token in any export.
+- **CLI** (`tests/cli.rs`): the real `powerwizz-cli` binary against the mock shop: report and exports written, stdout
+  only JSON with `--format json`, thresholds, refusals and no credentials anywhere in its output.
 
 ## Measurements
 
@@ -189,9 +241,9 @@ GitHub Actions run on every pull request and on `main`:
 - **test**: `fmt`, `clippy -D warnings` and `cargo test` on Linux; `clippy`, `cargo test` and the release build on Windows.
 - **security**: Trivy scans `Cargo.lock` for CVEs (weekly too). A fixable CRITICAL fails the job.
 - **release**: each merged PR into `main` tags the next SemVer version and publishes a GitHub release. The release has
-  `powerwizz-vX.Y.Z-windows-x64.exe` and `SHA256SUMS.txt`. Git tags are the source of truth. A PR label picks the bump:
-  `release:patch` (the default), `release:minor`, `release:major`, or `release:none` to skip the release.
-  The version shows in the window title and in the JSON report.
+  `powerwizz-vX.Y.Z-windows-x64.exe`, `powerwizz-cli-vX.Y.Z-windows-x64.exe` and `SHA256SUMS.txt`. Git tags are the
+  source of truth. A PR label picks the bump: `release:patch` (the default), `release:minor`, `release:major`, or `release:none` to skip the release.
+  The version shows in the window title, in `powerwizz-cli --version` and in the JSON report.
 
 ## Known limitations
 
