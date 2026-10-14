@@ -213,3 +213,42 @@ async fn shared_account_and_failed_login() {
     assert_eq!((m.requests, m.failures), (3, 3));
     assert!(m.errors.iter().all(|e| !e.message.contains("secret")));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn throttled_login_is_retried_after_retry_after() {
+    let srv = common::start().await;
+    let mut d = login_def(&srv);
+    d.auth = AuthStrategy::Shared;
+    d.shared_username = "team".into();
+    d.shared_password = "secret".into();
+    d.duration_secs = 4;
+    // The first two logins are throttled: those users wait 1 s (Retry-After) and log in on the next try.
+    d.login_steps[0].url = "/busy-login/2".into();
+    let mut h = start(d, vec![], false).unwrap();
+    h.wait().await;
+    let v: serde_json::Value = serde_json::from_str(&h.shared.report_json()).unwrap();
+    assert_eq!(v["totals"]["users_started"], 3);
+    assert_eq!(v["totals"]["users_logged_in"], 3);
+    assert_eq!(
+        v["totals"]["status_counts"]["429"], 2,
+        "the 429s still count"
+    );
+    assert_eq!(srv.bodies.lock().unwrap().len(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_login_is_not_a_logged_in_user() {
+    let srv = common::start().await;
+    let mut d = login_def(&srv);
+    d.login_steps[0].body.clear(); // /login answers 401
+    let mut h = start(d, vec![], false).unwrap();
+    h.wait().await;
+    let v: serde_json::Value = serde_json::from_str(&h.shared.report_json()).unwrap();
+    assert_eq!(
+        (
+            v["totals"]["users_started"].as_u64(),
+            v["totals"]["users_logged_in"].as_u64()
+        ),
+        (Some(3), Some(0))
+    );
+}

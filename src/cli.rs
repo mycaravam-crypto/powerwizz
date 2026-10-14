@@ -302,6 +302,17 @@ fn run(a: &Args, def: TestDefinition, accounts: Vec<Account>) -> i32 {
         if let Some(max) = a.max_p95_ms {
             gate("p95", p95 <= max, format!("{p95:.1} ms (max {max:.1} ms)"));
         }
+        // Users whose login failed put no load on the target: the numbers describe a smaller test.
+        let started = shared.started.load(std::sync::atomic::Ordering::Relaxed);
+        let logged_in = shared.logged_in.load(std::sync::atomic::Ordering::Relaxed);
+        if logged_in < started {
+            let detail = format!("only {logged_in} of {started} users logged in");
+            if a.max_error_rate.is_some() || a.max_p95_ms.is_some() {
+                gate("users", false, detail);
+            } else {
+                eprintln!("warn users: {detail}");
+            }
+        }
         if !a.json {
             println!("{}", summary(&shared, &m, runtime));
         }

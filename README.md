@@ -56,6 +56,11 @@ login request itself. **Unknown placeholders** (a typo like `{{tokn}}`) block th
 on with the next iteration. The 401 still counts as an error. A second 401 right after a new login is handled like any
 other error, so a broken login can't turn into a login storm.
 
+**Throttling.** A login step answered 429 (a login rate limit, which many users from one machine hit quickly) is
+tried again after the server's `Retry-After`, or after 1, 2, 4, 8 and 16 s, at most five times. Each 429 still counts
+as an error. A user whose login fails puts no load on the target, so the report counts `users_logged_in` next to
+`users_started`. Against a per-IP limit of n logins a minute, ramp up over at least users / n minutes.
+
 ### What never leaves the app
 
 Records, CSV exports, the JSON report and error messages never contain passwords, usernames, extracted tokens,
@@ -109,7 +114,7 @@ which has no console to print to.
 | `--details` | also `<name>-requests.csv` (needs `--out`) |
 | `--format text\|json` | stdout: a summary (default) or the `powerwizz.report/v1` report alone |
 | `--max-error-rate <0..1>` | fail when the total error rate is higher |
-| `--max-p95 <ms>` | fail when the total p95 latency is higher; with a threshold, a run without any request fails too |
+| `--max-p95 <ms>` | fail when the total p95 latency is higher; with a threshold, a run without any request fails too, and so does one where fewer users logged in than started (without a threshold that is a warning) |
 | `--yes` | you are authorized; required when the target isn't a local or private host |
 
 Progress (every 5 s), threshold verdicts and written files go to stderr, so stdout stays parseable. Ctrl+C stops the
@@ -154,7 +159,7 @@ From a 60 s run of `test.json` with 50 users against the mock shop, trimmed to o
   "target": { "base_url": "http://127.0.0.1:18080/", "local": true },
   "config": { "users": 50, "ramp_up_s": 10, "duration_s": 60, "request_limit": null,
               "timeout_s": 10, "auth": "PerUser", "scenarios": ["browse", "order"] },
-  "totals": { "users_started": 50, "iterations": 1808, "requests": 3758, "failures": 8,
+  "totals": { "users_started": 50, "users_logged_in": 50, "iterations": 1808, "requests": 3758, "failures": 8,
               "error_rate": 0.0021287919105907396, "rps": 62.629926452180285,
               "latency_ms": { "mean": 29.778, "p50": 26.679, "p95": 67.417, "p99": 81.946 },
               "status_counts": { "200": 2814, "201": 936, "500": 8 }, "error_kinds": { "status": 8 } },

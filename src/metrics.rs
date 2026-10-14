@@ -314,6 +314,7 @@ mod tests {
             duration: Duration::from_millis(dur_ms),
             error,
             message: String::new(),
+            retry_after: None,
         }
     }
 
