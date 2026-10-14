@@ -71,6 +71,7 @@ jobs:
         run: |
           mkdir dist
           cp target/release/powerwizz.exe "dist/powerwizz-v$VERSION-windows-x64.exe"
+          cp target/release/powerwizz-cli.exe "dist/powerwizz-cli-v$VERSION-windows-x64.exe"
           cd dist && sha256sum *.exe > SHA256SUMS.txt && cat SHA256SUMS.txt
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

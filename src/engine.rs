@@ -437,12 +437,8 @@ pub fn start_offset(i: u32, n: u32, ramp_up: Duration) -> Duration {
 /// Bounded so a slow aggregator applies backpressure instead of growing memory.
 const CHANNEL_CAP: usize = 10_000;
 
-/// Validates and starts a test. Must be called inside a tokio runtime.
-pub fn start(
-    def: TestDefinition,
-    accounts: Vec<Account>,
-    keep_records: bool,
-) -> Result<Handle, Vec<String>> {
+/// Everything `start` would refuse: the definition's errors and too few accounts. Empty means startable.
+pub fn check(def: &TestDefinition, accounts: &[Account]) -> Vec<String> {
     let mut errs = def.validate();
     if def.auth == AuthStrategy::PerUser && accounts.len() < def.users as usize {
         errs.push(format!(
@@ -451,6 +447,16 @@ pub fn start(
             def.users
         ));
     }
+    errs
+}
+
+/// Validates and starts a test. Must be called inside a tokio runtime.
+pub fn start(
+    def: TestDefinition,
+    accounts: Vec<Account>,
+    keep_records: bool,
+) -> Result<Handle, Vec<String>> {
+    let errs = check(&def, &accounts);
     if !errs.is_empty() {
         return Err(errs);
     }
