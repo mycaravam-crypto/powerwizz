@@ -6,6 +6,7 @@
 //! - `/set-cookie/{v}`         200 with `Set-Cookie: sid={v}`
 //! - `/cookie/{v}`             200 if the request carries `sid={v}`, else 403
 //! - `/login`                  200 + `Set-Cookie: sid={body}` if the body is non-empty, else 401
+//! - `/busy-login/{n}`         like `/login`, but the server's first n requests here get 429 + `Retry-After: 1`
 //! - `/drop`                   close the connection without responding
 //! - anything else             200
 #![allow(dead_code)]
@@ -45,13 +46,15 @@ pub async fn start() -> TestServer {
         bodies: Arc::default(),
     };
     let (hits, log, bodies) = (srv.hits.clone(), srv.log.clone(), srv.bodies.clone());
+    let busy = Arc::new(AtomicU64::new(0));
     let t0 = Instant::now();
     tokio::spawn(async move {
         loop {
             let Ok((sock, _)) = listener.accept().await else {
                 return;
             };
-            let (hits, log, bodies) = (hits.clone(), log.clone(), bodies.clone());
+            let (hits, log, bodies, busy) =
+                (hits.clone(), log.clone(), bodies.clone(), busy.clone());
             tokio::spawn(async move {
                 let mut sock = BufReader::new(sock);
                 loop {
@@ -107,6 +110,16 @@ pub async fn start() -> TestServer {
                                 extra = format!("Set-Cookie: sid={body}; Path=/\r\n");
                                 bodies.lock().unwrap().push(body);
                             }
+                        }
+                        ("busy-login", n)
+                            if busy.fetch_add(1, Ordering::Relaxed) < n.parse().unwrap_or(0) =>
+                        {
+                            status = 429;
+                            extra = "Retry-After: 1\r\n".into();
+                        }
+                        ("busy-login", _) => {
+                            extra = format!("Set-Cookie: sid={body}; Path=/\r\n");
+                            bodies.lock().unwrap().push(body);
                         }
                         ("drop", _) => return,
                         _ => {}

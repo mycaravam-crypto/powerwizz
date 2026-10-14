@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use reqwest::Url;
-use reqwest::header::{HeaderMap, SET_COOKIE};
+use reqwest::header::{HeaderMap, RETRY_AFTER, SET_COOKIE};
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
@@ -52,6 +52,8 @@ pub struct RequestRecord {
     pub error: Option<ErrorKind>,
     /// Sanitized, truncated; empty on success.
     pub message: String,
+    /// A 429's `Retry-After` in seconds, if the server sent one.
+    pub retry_after: Option<Duration>,
 }
 
 /// Placeholder values of one virtual user: {{username}}, {{password}}, {{vu_id}}
@@ -171,6 +173,7 @@ pub async fn run_step(ctx: &StepCtx<'_>, label: &str, step: &Step) -> RequestRec
         duration: Duration::ZERO,
         error: None,
         message: String::new(),
+        retry_after: None,
     };
     let url = match resolve_url(ctx.base, &fill(&step.url, ctx.vars)) {
         Ok(u) => u,
@@ -203,6 +206,11 @@ pub async fn run_step(ctx: &StepCtx<'_>, label: &str, step: &Step) -> RequestRec
     let result = async {
         let mut resp = req.send().await?;
         let status = resp.status().as_u16();
+        let retry_after = resp
+            .headers()
+            .get(RETRY_AFTER)
+            .and_then(|v| v.to_str().ok()?.trim().parse().ok())
+            .map(Duration::from_secs);
         let headers = if extracts {
             resp.headers().clone()
         } else {
@@ -216,13 +224,14 @@ pub async fn run_step(ctx: &StepCtx<'_>, label: &str, step: &Step) -> RequestRec
                 body.extend_from_slice(&chunk);
             }
         }
-        Ok::<_, reqwest::Error>((status, headers, body))
+        Ok::<_, reqwest::Error>((status, retry_after, headers, body))
     }
     .await;
     rec.duration = begin.elapsed();
     match result {
-        Ok((status, headers, body)) => {
+        Ok((status, retry_after, headers, body)) => {
             rec.status = Some(status);
+            rec.retry_after = retry_after;
             if !step.status_ok(status) {
                 rec.error = Some(ErrorKind::Status);
                 rec.message = format!("unexpected status {status}");
@@ -285,6 +294,8 @@ pub struct Shared {
     pub duration: Duration,
     pub users: u32,
     pub started: AtomicU32,
+    /// Users whose login steps succeeded (all started users when there are none).
+    pub logged_in: AtomicU32,
     pub active: AtomicU32,
     /// Fully completed scenario iterations.
     pub iterations: AtomicU64,
@@ -351,6 +362,7 @@ impl Shared {
             },
             "totals": {
                 "users_started": self.started.load(Ordering::Relaxed),
+                "users_logged_in": self.logged_in.load(Ordering::Relaxed),
                 "iterations": self.iterations.load(Ordering::Relaxed),
                 "requests": m.requests,
                 "failures": m.failures,
@@ -470,6 +482,7 @@ pub fn start(
         duration: Duration::from_secs(def.duration_secs),
         users: def.users,
         started: AtomicU32::new(0),
+        logged_in: AtomicU32::new(0),
         active: AtomicU32::new(0),
         iterations: AtomicU64::new(0),
         metrics: Mutex::new(Metrics::new(keep_records)),
@@ -583,7 +596,13 @@ async fn virtual_user(
     shared.active.fetch_sub(1, Ordering::Relaxed);
 }
 
+/// Login attempts after a 429 before the user gives up.
+const LOGIN_RETRIES: u32 = 5;
+
 /// Runs the login steps; false if one failed or the request limit was reached.
+/// A throttled step (429, e.g. a per-IP login rate limit that many virtual users
+/// from one machine hit) is retried after `Retry-After`, or 1, 2, 4… s, at most
+/// 60 s. Every attempt is recorded, so the 429s still count as errors.
 async fn login(
     shared: &Shared,
     def: &TestDefinition,
@@ -591,8 +610,17 @@ async fn login(
     tx: &mpsc::Sender<RequestRecord>,
 ) -> bool {
     for step in &def.login_steps {
-        if exec(shared, ctx, "login", step, tx).await != Some(Outcome::Ok) {
-            return false;
+        let mut attempt = 0;
+        loop {
+            match exec(shared, ctx, "login", step, tx).await {
+                Some(Outcome::Ok) => break,
+                Some(Outcome::Throttled(wait)) if attempt < LOGIN_RETRIES => {
+                    let wait = wait.unwrap_or(Duration::from_secs(1 << attempt));
+                    tokio::time::sleep(wait.min(Duration::from_secs(60))).await;
+                    attempt += 1;
+                }
+                _ => return false,
+            }
         }
     }
     true
@@ -607,6 +635,7 @@ async fn user_loop(
     if !login(shared, def, ctx, tx).await {
         return; // login failed or limit reached: this user ends
     }
+    shared.logged_in.fetch_add(1, Ordering::Relaxed);
     // Set after a re-login until a step succeeds, so a 401 that a fresh login
     // doesn't fix can't turn into a login storm.
     let mut relogged = false;
@@ -644,6 +673,8 @@ enum Outcome {
     Ok,
     /// 401 although 401 was not expected.
     Unauthorized,
+    /// 429 although 429 was not expected, with the server's `Retry-After`.
+    Throttled(Option<Duration>),
     Failed,
 }
 
@@ -665,6 +696,7 @@ async fn exec(
     let outcome = match (rec.error, rec.status) {
         (None, _) => Outcome::Ok,
         (Some(ErrorKind::Status), Some(401)) => Outcome::Unauthorized,
+        (Some(ErrorKind::Status), Some(429)) => Outcome::Throttled(rec.retry_after),
         _ => Outcome::Failed,
     };
     if tx.send(rec).await.is_err() {
