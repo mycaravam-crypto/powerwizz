@@ -10,9 +10,9 @@ jobs:
   review:
     # Fork PRs get no secrets; skip them instead of failing.
     if: github.event.pull_request.head.repo.full_name == github.repository
-    uses: mycaravam-crypto/smartwizz/.github/workflows/review.yml@227302e8b84f721ca3bf594e7943fb95034c0c87 # main 2026-10-18
+    uses: mycaravam-crypto/smartwizz/.github/workflows/review.yml@e99f67b7a1ab02d77d211c9629277510a4c047ab # main 2026-10-18
     with:
       fail-on: high
-      smartwizz-ref: 227302e8b84f721ca3bf594e7943fb95034c0c87
+      smartwizz-ref: e99f67b7a1ab02d77d211c9629277510a4c047ab
     secrets:
       SMARTWIZZ_API_KEY: ${{ secrets.SMARTWIZZ_API_KEY }}
