@@ -25,7 +25,7 @@ cargo build --release --target x86_64-pc-windows-gnu
 
 ## Quick start
 
-`examples/mockapp` is an in-memory web shop to try it against (login, bearer tokens, a protected API, varying
+[`examples/mockapp`](examples/mockapp/README.md) is an in-memory web shop to try it against (login, bearer tokens, a protected API, varying
 latency, 1 % failing orders, a rate limit):
 
 ```bash
@@ -39,6 +39,7 @@ A test definition sets the base URL, virtual users (max. 500), ramp-up, duration
 steps with headers, body, random pauses and expected status codes. Steps can use `{{username}}`, `{{password}}`,
 `{{vu_id}}` and values extracted from earlier responses (`token = /access_token`, `header:Name`, `cookie:name`).
 Definitions save without passwords, and no export ever contains credentials, tokens, cookies, headers or bodies.
+The full walkthrough, token extraction and re-login rules: [docs/usage.md](docs/usage.md).
 
 ## Commands
 
@@ -63,7 +64,8 @@ powerwizz-cli --version | help
 | `--max-p95 <ms>` | fail when the p95 latency is higher |
 | `--yes` | you are authorized; required for a non-local target |
 
-Progress goes to stderr, so stdout stays parseable. As a gitwizz gate, with docwizz picking up the numbers:
+Progress goes to stderr, so stdout stays parseable. All options: [docs/usage.md](docs/usage.md#command-line-powerwizz-cli);
+the report format: [docs/report.md](docs/report.md). As a gitwizz gate, with docwizz picking up the numbers:
 
 ```yaml
 # .gitwizz.yml
@@ -91,8 +93,10 @@ docwizz load import . load/run-bericht.json
 - Percentiles are accurate to about ±2.5 %; requests in flight at the end are not counted.
 - Limits: 500 users, 1 h, 100 000 request details. Results stay in memory until exported.
 
+All limitations: [docs/usage.md](docs/usage.md#known-limitations).
+
 Measured on an i9-13900HK: 500 users against the mock shop used 45 MB RAM with no measurable latency overhead; without
-pauses, about 30 000–45 000 requests per second.
+pauses, about 30 000–45 000 requests per second. Conditions and full tables: [docs/measurements.md](docs/measurements.md).
 
 ## Development
 
@@ -103,4 +107,5 @@ cargo test                                  # engine, end-to-end against the moc
 ```
 
 Every merge to `main` is released as the next SemVer tag with both exes and `SHA256SUMS.txt`; a PR label picks the
-bump: `release:patch` (default), `release:minor`, `release:major` or `release:none`. Design notes: [PLAN.md](PLAN.md).
+bump: `release:patch` (default), `release:minor`, `release:major` or `release:none`. Build details, test suites and CI: [docs/development.md](docs/development.md). Design notes:
+[PLAN.md](PLAN.md).
