@@ -67,15 +67,40 @@ which has no console to print to.
 | `--max-error-rate <0..1>` | fail when the total error rate is higher |
 | `--max-p95 <ms>` | fail when the total p95 latency is higher; with a threshold, a run without any request fails too, and so does one where fewer users logged in than started (without a threshold that is a warning) |
 | `--yes` | you are authorized; required when the target isn't a local or private host |
+| `--start-users <n>` `--max-users <n>` `--step-size <n>` `--stage-duration <s>` | capacity discovery, see below; all four together |
 
 Progress (every 5 s), threshold verdicts and written files go to stderr, so stdout stays parseable. Ctrl+C stops the
 run like **■ stop** and still prints and writes the results.
 
 | Exit code | Meaning |
 |---|---|
-| `0` | done, thresholds met (`validate`: the test would start) |
-| `1` | a threshold was missed |
+| `0` | done, thresholds met (`validate`: the test would start); capacity: every stage up to `--max-users` passed |
+| `1` | a threshold was missed; capacity: also a failed or stopped stage |
 | `2` | bad arguments, an invalid definition or accounts, a non-local target without `--yes`, an unwritable output |
+
+### Capacity discovery
+
+How many users does the target take before a threshold breaks? Give the four capacity options and at least one
+threshold:
+
+    powerwizz-cli run load/test.json --start-users 10 --max-users 100 --step-size 10 --stage-duration 60 --max-p95 200
+
+The CLI runs stages of 10, 20, … 100 users, one after another. Each stage is a normal test with the definition's
+scenarios, login and ramp-up, for `--stage-duration` seconds. After each stage the thresholds decide:
+
+- **passed:** all thresholds met; the next stage adds `--step-size` users (the last stage is exactly `--max-users`).
+- **threshold_exceeded:** a threshold missed; no further stage starts. Exit 1.
+- **failed:** the stage measured less than it claims (no request completed, or fewer users logged in than started).
+  No further stage starts. Exit 1.
+- **cancelled:** Ctrl+C during the stage. No further stage starts. Finished stages are still printed and written. Exit 1.
+
+The result is the **highest passing stage** and the **stop reason**. In the JSON report it's the `capacity` section
+(see [report.md](report.md)). The rest of the report and the CSV exports describe the last stage that ran.
+
+Limits stay as for a single test: at most 500 users per stage, and all stages together at most 1 h. The ramp-up
+must fit in one stage, and `--accounts` must cover `--max-users`. All of this is checked before the first request.
+It is deliberately not "raise the load until the target falls over": a threshold is required, and the first missed
+threshold ends it.
 
 **In the ecosystem.** A gitwizz gate runs the test and fails the PR on the thresholds; `gitwizz doctor` checks that
 `powerwizz-cli --version` works. docwizz then puts the measured numbers next to each endpoint in `api.md` and its HTML:
@@ -104,3 +129,5 @@ gates:
 - **Fixed limits:** 500 users, 1 h, 100 000 request details, the last 200 errors.
 - **Results live in memory only** until you export them. Closing the app discards them.
 - **File paths are typed into text fields;** there is no file dialog.
+- **Capacity discovery is CLI-only.** Every stage is a separate run, so users restart (and log in again) at each
+  stage, and the app has no mode for it yet.
