@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use reqwest::Url;
 
+use crate::capacity;
 use crate::engine::{self, Shared};
 use crate::model::{self, Account, AuthStrategy, TestDefinition};
 
@@ -33,7 +34,15 @@ run options:
   --max-p95 <ms>            exit 1 when the total p95 latency is higher
   --yes                     confirm you are authorized; required for a target that isn't local or private
 
-exit codes: 0 done (thresholds met) · 1 a threshold missed · 2 usage, invalid input or refused target";
+capacity discovery (all four together, plus --max-error-rate and/or --max-p95):
+  --start-users <n>         first stage's users
+  --max-users <n>           last stage's users (max. 500)
+  --step-size <n>           users added per stage
+  --stage-duration <s>      seconds per stage; all stages together max. 3600 s
+                            stages run one after another and stop at the first missed threshold
+
+exit codes: 0 done (thresholds met) · 1 a threshold missed (capacity: or a stage failed or was stopped)
+            · 2 usage, invalid input or refused target";
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Args {
@@ -50,6 +59,24 @@ pub struct Args {
     pub max_error_rate: Option<f64>,
     pub max_p95_ms: Option<f64>,
     pub yes: bool,
+    pub start_users: Option<u32>,
+    pub max_users: Option<u32>,
+    pub step_size: Option<u32>,
+    pub stage_duration_secs: Option<u64>,
+}
+
+impl Args {
+    /// The capacity discovery settings; `None` for a fixed-load run. `parse` ensures all four are given or none.
+    pub fn capacity(&self) -> Option<capacity::Config> {
+        Some(capacity::Config {
+            start_users: self.start_users?,
+            max_users: self.max_users?,
+            step_size: self.step_size?,
+            stage_duration_secs: self.stage_duration_secs?,
+            max_error_rate: self.max_error_rate,
+            max_p95_ms: self.max_p95_ms,
+        })
+    }
 }
 
 /// Parses the arguments after the program name. `--flag value` and `--flag=value` both work.
@@ -103,6 +130,10 @@ pub fn parse(args: &[String]) -> Result<Args, String> {
                 .ok_or(format!("--{name} needs a value"))
         };
         let number = |v: String| v.parse::<f64>().ok().filter(|n| n.is_finite() && *n >= 0.0);
+        let count = |v: String| {
+            v.parse::<u32>()
+                .map_err(|_| format!("--{name} must be a whole number, not '{v}'"))
+        };
         match name {
             "base-url" => a.base_url = Some(value()?),
             "label" => a.label = Some(value()?),
@@ -133,6 +164,10 @@ pub fn parse(args: &[String]) -> Result<Args, String> {
                         .ok_or(format!("--max-p95 must be milliseconds, not '{v}'"))?,
                 );
             }
+            "start-users" => a.start_users = Some(count(value()?)?),
+            "max-users" => a.max_users = Some(count(value()?)?),
+            "step-size" => a.step_size = Some(count(value()?)?),
+            "stage-duration" => a.stage_duration_secs = Some(count(value()?)?.into()),
             _ => return Err(format!("unknown option --{name}")),
         }
     }
@@ -149,6 +184,18 @@ pub fn parse(args: &[String]) -> Result<Args, String> {
     }
     if a.details && a.out.is_none() {
         return Err("--details needs --out".into());
+    }
+    let capacity_flags = [
+        a.start_users.is_some(),
+        a.max_users.is_some(),
+        a.step_size.is_some(),
+        a.stage_duration_secs.is_some(),
+    ];
+    if capacity_flags.contains(&true) && capacity_flags.contains(&false) {
+        return Err(
+            "capacity discovery needs --start-users, --max-users, --step-size and --stage-duration"
+                .into(),
+        );
     }
     Ok(a)
 }
@@ -186,7 +233,10 @@ pub fn main(args: &[String]) -> i32 {
                 );
                 return 0;
             }
-            return run(&a, def, accounts);
+            return match a.capacity() {
+                Some(cfg) => run_capacity(&a, def, accounts, &cfg),
+                None => run(&a, def, accounts),
+            };
         }
     }
     0
@@ -214,9 +264,15 @@ fn prepare(a: &Args) -> Result<(TestDefinition, Vec<Account>), Vec<String>> {
         Some(path) => model::load_accounts(path).map_err(|e| vec![format!("{path}: {e}")])?,
         None => Vec::new(),
     };
-    match engine::check(&def, &accounts) {
-        errs if errs.is_empty() => Ok((def, accounts)),
-        errs => Err(errs),
+    let errs = match a.capacity() {
+        // Checked as its largest stage: max users, one stage long.
+        Some(cfg) => capacity::check(&def, &accounts, &cfg),
+        None => engine::check(&def, &accounts),
+    };
+    if errs.is_empty() {
+        Ok((def, accounts))
+    } else {
+        Err(errs)
     }
 }
 
@@ -234,13 +290,15 @@ fn host(url: &str) -> String {
         .unwrap_or_default()
 }
 
-fn run(a: &Args, def: TestDefinition, accounts: Vec<Account>) -> i32 {
-    let target = host(&def.base_url);
+/// The checks every run passes before sending a request: authorization for non-local targets and a writable output
+/// folder. `Err` carries the exit code.
+fn preflight(a: &Args, def: &TestDefinition) -> Result<(), i32> {
     if !model::is_local_host(&def.base_url) && !a.yes {
         eprintln!(
-            "powerwizz-cli: {target} is not a local or private host; pass --yes if you are authorized to load-test it"
+            "powerwizz-cli: {} is not a local or private host; pass --yes if you are authorized to load-test it",
+            host(&def.base_url)
         );
-        return 2;
+        return Err(2);
     }
     if let Some(dir) = a
         .out
@@ -251,8 +309,16 @@ fn run(a: &Args, def: TestDefinition, accounts: Vec<Account>) -> i32 {
         // Fail now, not after an hour of load.
         if let Err(e) = std::fs::create_dir_all(dir) {
             eprintln!("powerwizz-cli: {}: {e}", dir.display());
-            return 2;
+            return Err(2);
         }
+    }
+    Ok(())
+}
+
+fn run(a: &Args, def: TestDefinition, accounts: Vec<Account>) -> i32 {
+    let target = host(&def.base_url);
+    if let Err(code) = preflight(a, &def) {
+        return code;
     }
     eprintln!(
         "{VERSION} · {target} · {} users · ramp-up {} s · {} s · only load-test systems you are authorized to test",
@@ -323,36 +389,151 @@ fn run(a: &Args, def: TestDefinition, accounts: Vec<Account>) -> i32 {
             println!("{}", summary(&shared, &m, runtime));
         }
     }
+    let report = shared.report_json();
     if a.json {
-        println!("{}", shared.report_json());
+        println!("{report}");
     }
-    if let Some(out) = &a.out {
-        let report = shared.report_json();
-        let m = shared.metrics.lock().unwrap();
-        let mut files = vec![
-            (format!("{out}-bericht.json"), report),
-            (
-                format!("{out}-zusammenfassung.csv"),
-                crate::metrics::summary_csv(&m, runtime),
-            ),
-        ];
-        if a.details {
-            files.push((
-                format!("{out}-requests.csv"),
-                crate::metrics::records_csv(&m),
-            ));
-        }
-        for (path, text) in files {
-            match std::fs::write(&path, text) {
-                Ok(()) => eprintln!("wrote {path}"),
-                Err(e) => {
-                    eprintln!("powerwizz-cli: {path}: {e}");
-                    code = 2;
-                }
+    if !write_outputs(a, &shared, report) {
+        code = 2;
+    }
+    code
+}
+
+/// With `--out`: the report, the summary CSV and with `--details` the request CSV. False if a file couldn't be written.
+fn write_outputs(a: &Args, shared: &Shared, report: String) -> bool {
+    let Some(out) = &a.out else {
+        return true;
+    };
+    let m = shared.metrics.lock().unwrap();
+    let mut files = vec![
+        (format!("{out}-bericht.json"), report),
+        (
+            format!("{out}-zusammenfassung.csv"),
+            crate::metrics::summary_csv(&m, shared.runtime()),
+        ),
+    ];
+    if a.details {
+        files.push((
+            format!("{out}-requests.csv"),
+            crate::metrics::records_csv(&m),
+        ));
+    }
+    let mut ok = true;
+    for (path, text) in files {
+        match std::fs::write(&path, text) {
+            Ok(()) => eprintln!("wrote {path}"),
+            Err(e) => {
+                eprintln!("powerwizz-cli: {path}: {e}");
+                ok = false;
             }
         }
     }
+    ok
+}
+
+/// Capacity discovery: stages of growing load until a threshold is missed (see `capacity`). The report and exports
+/// describe the last stage and carry every stage in the report's `capacity` section.
+fn run_capacity(
+    a: &Args,
+    def: TestDefinition,
+    accounts: Vec<Account>,
+    cfg: &capacity::Config,
+) -> i32 {
+    if let Err(code) = preflight(a, &def) {
+        return code;
+    }
+    let stages = cfg.stages();
+    eprintln!(
+        "{VERSION} · {} · capacity {}..{} users, step {}, {} s per stage ({} stages, max. {} s) · \
+         only load-test systems you are authorized to test",
+        host(&def.base_url),
+        cfg.start_users,
+        cfg.max_users,
+        cfg.step_size,
+        cfg.stage_duration_secs,
+        stages.len(),
+        stages.len() as u64 * cfg.stage_duration_secs,
+    );
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let outcome = rt.block_on(async {
+        let (cancel, cancelled) = tokio::sync::watch::channel(false);
+        let ctrl_c = tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                eprintln!("powerwizz-cli: stopping, finished stages are kept");
+                cancel.send_replace(true);
+            }
+        });
+        let outcome = capacity::run(def, accounts, a.details, cfg, cancelled, |s| {
+            eprintln!(
+                "stage {:>3} users  requests {}  rps {:.1}  errors {:.2} %  p95 {:.1} ms  {}: {}",
+                s.users,
+                s.measured.requests,
+                s.measured.rps,
+                s.measured.error_rate * 100.0,
+                s.measured.p95_ms,
+                s.result.as_str(),
+                s.detail
+            );
+        })
+        .await;
+        ctrl_c.abort();
+        outcome
+    });
+    let outcome = match outcome {
+        Ok(o) => o,
+        Err(errs) => {
+            for e in errs {
+                eprintln!("powerwizz-cli: {e}");
+            }
+            return 2;
+        }
+    };
+    let Some(last) = outcome.last.clone() else {
+        eprintln!("FAIL capacity: stopped before the first stage finished; nothing to report");
+        return 1;
+    };
+
+    let highest = outcome
+        .highest_passed_users()
+        .map_or("none".to_string(), |u| format!("{u} users"));
+    let passed = outcome.stop_reason == capacity::StopReason::MaxUsersReached;
+    eprintln!(
+        "{} capacity: highest passing stage {highest} · stop: {}",
+        if passed { "ok  " } else { "FAIL" },
+        outcome.stop_reason.as_str()
+    );
+    let mut report = last.report_value();
+    report["capacity"] = outcome.to_json(cfg);
+    let report = serde_json::to_string_pretty(&report).expect("serializable");
+    if a.json {
+        println!("{report}");
+    } else {
+        println!("{}", capacity_summary(&outcome, &highest));
+    }
+    let mut code = if passed { 0 } else { 1 };
+    if !write_outputs(a, &last, report) {
+        code = 2;
+    }
     code
+}
+
+fn capacity_summary(o: &capacity::Outcome, highest: &str) -> String {
+    let mut out = format!(
+        "capacity: highest passing stage {highest} · stop: {}\n users  requests       rps  errors %   p95 ms  result\n",
+        o.stop_reason.as_str()
+    );
+    for s in &o.stages {
+        out += &format!(
+            "{:>6}  {:>8}  {:>8.1}  {:>8.2}  {:>7.1}  {}\n",
+            s.users,
+            s.measured.requests,
+            s.measured.rps,
+            s.measured.error_rate * 100.0,
+            s.measured.p95_ms,
+            s.result.as_str()
+        );
+    }
+    out.trim_end().to_string()
 }
 
 fn ms(d: Duration) -> f64 {
@@ -446,6 +627,36 @@ mod tests {
             "run t.json --max-p95 -1",
             "run t.json --details",
             "validate t.json --out o",
+        ] {
+            assert!(p(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn parses_capacity_options() {
+        let a = p("run t.json --start-users 10 --max-users=100 --step-size 10 --stage-duration 30 --max-p95 200").unwrap();
+        let c = a.capacity().unwrap();
+        assert_eq!(
+            (
+                c.start_users,
+                c.max_users,
+                c.step_size,
+                c.stage_duration_secs
+            ),
+            (10, 100, 10, 30)
+        );
+        assert_eq!((c.max_error_rate, c.max_p95_ms), (None, Some(200.0)));
+        assert_eq!(
+            p("run t.json --max-p95 200").unwrap().capacity(),
+            None,
+            "fixed load stays fixed load"
+        );
+        for bad in [
+            "run t.json --start-users 10",
+            "run t.json --start-users 10 --max-users 20 --step-size 5",
+            "run t.json --start-users ten --max-users 20 --step-size 5 --stage-duration 1",
+            "run t.json --start-users -1 --max-users 20 --step-size 5 --stage-duration 1",
+            "validate t.json --start-users 1",
         ] {
             assert!(p(bad).is_err(), "{bad}");
         }

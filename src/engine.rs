@@ -327,6 +327,11 @@ impl Shared {
     /// Results as `powerwizz.report/v1` JSON for docwizz. Contains no credentials,
     /// headers, bodies, cookies, error messages or query strings.
     pub fn report_json(&self) -> String {
+        serde_json::to_string_pretty(&self.report_value()).expect("serializable")
+    }
+
+    /// The report as a JSON value, so a capacity run can add its `capacity` section.
+    pub fn report_value(&self) -> serde_json::Value {
         let d = &self.def;
         let m = self.metrics.lock().unwrap();
         let runtime = self.runtime().as_secs_f64();
@@ -345,7 +350,7 @@ impl Shared {
         let _ = target.set_password(None);
         target.set_query(None);
         target.set_fragment(None);
-        let report = json!({
+        json!({
             "schema": "powerwizz.report/v1",
             "generator": format!("powerwizz {}", env!("CARGO_PKG_VERSION")),
             "started_at": iso_utc(self.started_at),
@@ -390,8 +395,7 @@ impl Shared {
                 "p95_ms": ms(p.p95),
                 "p99_ms": ms(p.p99),
             })).collect::<Vec<_>>(),
-        });
-        serde_json::to_string_pretty(&report).expect("serializable")
+        })
     }
 
     fn limit_reached(&self) -> bool {

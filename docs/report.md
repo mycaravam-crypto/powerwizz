@@ -33,4 +33,24 @@ From a 60 s run of `test.json` with 50 users against the mock shop, trimmed to o
 - **Endpoint:** `steps[].method` and `steps[].path`. The path is the step's template, resolved against the base URL,
   so placeholders stay literal.
 - **Series:** one point per second (`t` is the end of the second), at most 3700.
+- **Capacity:** a capacity discovery run (`powerwizz-cli run … --start-users …`) adds a `capacity` section; the rest
+  of the report describes the run's last stage. Fixed-load reports don't have it.
+
+  ```json
+  "capacity": {
+    "config": { "start_users": 10, "max_users": 50, "step_size": 20, "stage_duration_s": 60,
+                "max_error_rate": 0.01, "max_p95_latency_ms": null },
+    "stages": [
+      { "users": 10, "requests": 3120, "rps": 52.0, "p95_ms": 41.2, "error_rate": 0.0,
+        "result": "passed", "detail": "thresholds met" },
+      { "users": 30, "requests": 8790, "rps": 146.5, "p95_ms": 88.9, "error_rate": 0.024,
+        "result": "threshold_exceeded", "detail": "error rate 2.40 % > 1.00 %" }
+    ],
+    "highest_passed_users": 10,
+    "stop_reason": "threshold_exceeded"
+  }
+  ```
+
+  `result` is `passed`, `threshold_exceeded`, `failed` or `cancelled`. `stop_reason` is `max_users_reached`,
+  `threshold_exceeded`, `failed` or `cancelled`. `highest_passed_users` is `null` when no stage passed.
 - **Versioning:** v1 may gain fields. Renamed or removed fields bump the schema version.

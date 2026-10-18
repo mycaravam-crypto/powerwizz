@@ -78,7 +78,9 @@ Vor dem Hinzufügen weiterer Crates prüfen, ob eine bestehende Dependency die F
 - Cloud-Dienste, Accounts, Telemetrie, Lizenzserver, Datenbank.
 - Scripting-Sprache, Plugin-System, Variablen-Engine (Ausnahme: die festen Platzhalter aus §6) oder Workflow-IDE.
 - HTTP/3, WebSockets, Browser-Rendering.
-- Automatische Laststeigerung bis zum Ausfall des Zielsystems.
+- Automatische Laststeigerung bis zum Ausfall des Zielsystems. Erlaubt ist nur die begrenzte Kapazitätsermittlung der
+  CLI: Stufen von `start_users` bis `max_users` (≤ `MAX_USERS`), alle Stufen zusammen ≤ `MAX_DURATION_SECS`. Mindestens
+  ein Schwellwert ist Pflicht, und der erste verfehlte Schwellwert beendet die Steigerung.
 - Automatische Retries.
 
 ## 5. Benutzer- und Szenariomodell
